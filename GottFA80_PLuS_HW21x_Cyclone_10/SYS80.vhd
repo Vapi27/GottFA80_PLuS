@@ -360,6 +360,10 @@ CLK  <= 'Z' when lisy_active = '1' else SDcard_CLK  when reset_l = '0' else EEpr
 MISO <= lisy_miso when lisy_active = '1' else 'Z';
 lisy_sclk <= CLK;
 lisy_mosi <= MOSI;
+-- handshake to the ESP32 companion on the Debug pin: '1' = lisyctrl/diag mode is
+-- active => the shared SPI bus is released to the ESP (FPGA is now an SPI slave,
+-- 6502 held in reset, SD/EEPROM deselected). The ESP polls this before driving.
+Debug <= lisy_active;
 CS_SDcard <= '1' when lisy_active = '1' else sd_cs_n;
 CS_EEprom <= '1' when lisy_active = '1' else ee_cs_n;
 cpu_res_n <= '0' when lisy_active = '1' else reset_l;
