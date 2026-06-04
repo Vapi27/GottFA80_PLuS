@@ -55,7 +55,11 @@ Resource impact of lisyctrl, vs the pristine `main` (same device, same flow):
 So lisyctrl costs ~522 LEs and **no extra pins and no extra memory** — it reuses
 the existing shared SPI bus and the door test switch — and the design still fits
 the 10CL006 with timing met. (`MOSI`/`MISO`/`CLK` land back on their original
-pins 42/34/39, now as bidirectional.) The `sim/` GHDL testbenches validate the
+pins 42/34/39, now as bidirectional.) For a tight device the whole bridge can be
+**compiled out** via the new `lisy_enable` generic on `SYS80` (default `true`):
+set it `false` and the build drops to **5,178 LEs (83 %)** — reclaiming the full
+cost and folding the shared-bus muxes back to stock — also verified on this flow.
+The `sim/` GHDL testbenches validate the
 logic and bus-sharing behaviourally; this section validates synthesis/fit/timing
 on Intel's tools. The remaining gate before merge is on-machine hardware
 bring-up (with the ESP32 companion).
