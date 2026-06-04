@@ -155,6 +155,8 @@ set_global_assignment -name VHDL_FILE ../lib_common/T65/T65_MCode.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/T65/T65_ALU.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/T65/T65.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/SPI_Master.vhd
+set_global_assignment -name VHDL_FILE ../lib_common/spi_slave.vhd
+set_global_assignment -name VHDL_FILE ../lib_common/lisyctrl.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/SN74175.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/SN7448_GTB.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/SN7448.vhd

@@ -27,6 +27,12 @@ use ieee.std_logic_1164.all;
 use IEEE.numeric_std.all;
 
 entity SYS80 is
+	generic(
+		-- compile-time include the lisyctrl diagnostic bridge (default on).
+		-- set false to recover ~522 LEs on a tight device; the shared-bus
+		-- muxes then constant-fold back to the stock SD/EEPROM behaviour.
+		lisy_enable : boolean := true
+	);
 	port(
 	   -- the FPGA board
 		clk_50	: in std_logic;
@@ -54,9 +60,9 @@ entity SYS80 is
 		-- SPI SD card & EEprom
 		CS_SDcard	: 	buffer 	std_logic;
 		CS_EEprom	: 	buffer 	std_logic;
-		MOSI			: 	out 	std_logic;
-		MISO			: 	in 	std_logic;
-		CLK			: 	out 	std_logic;
+		MOSI			: 	inout 	std_logic;  -- lisyctrl: inout for shared-bus slave mode
+		MISO			: 	inout 	std_logic;
+		CLK			: 	inout 	std_logic;
 		
 		-- DIp Switch Game selectOptions
 		DIP_Strobe	:	out 	std_logic_vector(3 downto 0);
@@ -225,6 +231,14 @@ signal soundrom2_addr	:  std_logic_vector(10 downto 0);
 signal wr_soundrom1		: std_logic;
 signal wr_soundrom2		: std_logic;
 
+-- ===== lisyctrl diagnostic bridge (added) =====
+signal lisy_active : std_logic := '0';
+signal lisy_sclk, lisy_mosi, lisy_miso : std_logic;
+signal lisy_u4pb, lisy_u6pa, lisy_u6pb : std_logic_vector(7 downto 0);
+signal u6pa_src, u6pb_src, u4_pb_cpu   : std_logic_vector(7 downto 0);
+signal sd_cs_n, ee_cs_n, cpu_res_n     : std_logic;
+signal lisy_trig : std_logic;   -- long-press of the Gottlieb door test switch
+
 
 begin
 
@@ -338,8 +352,53 @@ slam <= '0' when opt_slam_fix_open = '1' else --slam open for late 80B games
 -- shared SPI bus
 ----------------------
 --SD card only at start of game
-MOSI <= SDcard_MOSI when reset_l = '0' else EEprom_MOSI;
-CLK <= SDcard_CLK when reset_l = '0' else EEprom_CLK;
+-- ===== lisyctrl: shared-bus arbitration + I/O mux (diagnostic mode) =====
+-- In diag mode the FPGA tri-states the SPI bus and becomes an SPI slave, the
+-- 6502 is held in reset, and lisyctrl drives the machine I/O. Default = inactive
+-- => behaviour is identical to the original. See LISYCTRL.md.
+MOSI <= 'Z' when lisy_active = '1' else SDcard_MOSI when reset_l = '0' else EEprom_MOSI;
+CLK  <= 'Z' when lisy_active = '1' else SDcard_CLK  when reset_l = '0' else EEprom_CLK;
+MISO <= lisy_miso when lisy_active = '1' else 'Z';
+lisy_sclk <= CLK;
+lisy_mosi <= MOSI;
+CS_SDcard <= '1' when lisy_active = '1' else sd_cs_n;
+CS_EEprom <= '1' when lisy_active = '1' else ee_cs_n;
+cpu_res_n <= '0' when lisy_active = '1' else reset_l;
+u6pa_src  <= lisy_u6pa when lisy_active = '1' else U6_pa_out;
+u6pb_src  <= lisy_u6pb when lisy_active = '1' else U6_pb_out;
+U4_PB     <= lisy_u4pb when lisy_active = '1' else u4_pb_cpu;
+-- mode entry: a LONG-PRESS of the Gottlieb door test switch enters diag mode;
+-- any reset/reboot (reset_l='0') exits it. (lisy_trig = detect_test_sw long_push,
+-- which is active from attract/idle -- the usual place to run diagnostics.)
+GEN_LISY: if lisy_enable generate
+LISY_MODE: process begin
+	wait until rising_edge(clk_50);
+	if reset_l = '0' then
+		lisy_active <= '0';
+	elsif lisy_trig = '1' then
+		lisy_active <= '1';
+	end if;
+end process;
+LISY_CTRL: entity work.lisyctrl
+port map(
+	clk => clk_50, active => lisy_active,
+	sclk => lisy_sclk, mosi => lisy_mosi, miso => lisy_miso,
+	o_U4_PB => lisy_u4pb, i_U4_PA => U4_pa_in,
+	o_U5_PA => open, o_U5_PB7 => open,
+	o_U6_PA => lisy_u6pa, o_U6_PB => lisy_u6pb, o_segments => open,
+	i_DIP_Ret => '0' & DIP_Return, i_slam => slam, wd_tripped => open
+);
+end generate GEN_LISY;
+
+-- lisyctrl excluded: drive the shared signals to constants so the arbitration
+-- muxes fold to stock (lisy_active='0' => MISO=Z/input, MOSI/CLK=SD or EEPROM).
+GEN_NOLISY: if not lisy_enable generate
+	lisy_active <= '0';
+	lisy_miso   <= 'Z';
+	lisy_u4pb   <= (others => '0');
+	lisy_u6pa   <= (others => '0');
+	lisy_u6pb   <= (others => '0');
+end generate GEN_NOLISY;
 
 ---------------------
 -- count ints
@@ -384,7 +443,7 @@ port map(
    o_SPI_Clk  => SDcard_CLK,
    i_SPI_MISO => MISO,
    o_SPI_MOSI => SDcard_MOSI,
-   o_SPI_CS_n => CS_SDcard,	
+   o_SPI_CS_n => sd_cs_n,
 	-- selection
 	selection => "0" & opt_freeplay & not game_select,
 	-- data
@@ -544,7 +603,7 @@ port map(
 	sw_return => U4_pa_in(7),
 	sw_enable => U5_pb_out(7),
 	short_push => test_sw,
-	long_push => open,
+	long_push => lisy_trig,   -- lisyctrl: long-press of the door test switch enters diag
 	rst 	=> game_running
 );
 
@@ -667,10 +726,10 @@ segments_80(24) <= not U5_pb_out(6);
 --------------------------------------------------
 -- solenoids & lamps
 --------------------------------------------------
-U6_PA(4 downto 0) <= not U6_pa_out(4 downto 0) when game_running='1' else "00000"; --sound AND Z31
-U6_PA(7 downto 5) <= U6_pa_out(7 downto 5) when game_running='1' else "111"; -- decoder enable and Sol9
-U6_PB(3 downto 0) <= not U6_pb_out(3 downto 0) when game_running='1' else "1111"; -- thunk prevention (inverter)
-U6_PB(7 downto 4) <= U6_pb_out(7 downto 4)when reset_l='1' else lamp_ds; -- thunk prevention 
+U6_PA(4 downto 0) <= not u6pa_src(4 downto 0) when (game_running='1' or lisy_active='1') else "00000"; --sound AND Z31
+U6_PA(7 downto 5) <= u6pa_src(7 downto 5) when (game_running='1' or lisy_active='1') else "111"; -- decoder enable and Sol9
+U6_PB(3 downto 0) <= not u6pb_src(3 downto 0) when (game_running='1' or lisy_active='1') else "1111"; -- thunk prevention (inverter)
+U6_PB(7 downto 4) <= u6pb_src(7 downto 4) when (reset_l='1' or lisy_active='1') else lamp_ds; -- thunk prevention 
 	
 -- cpu clock 892Khz
 clock_gen: entity work.cpu_clk_gen 
@@ -683,7 +742,7 @@ port map(
 U1: entity work.T65 -- 6502 
 port map(
 	Mode    			=> "00",
-	Res_n   			=> reset_l,
+	Res_n   			=> cpu_res_n,
 	Enable  			=> '1',
 	Clk     			=> cpu_clk,
 	Rdy     			=> '1',
@@ -715,7 +774,7 @@ port map(
    o_SPI_Clk  => EEprom_CLK,
    i_SPI_MISO => MISO,
    o_SPI_MOSI => EEprom_MOSI,
-   o_SPI_CS_n => CS_EEprom,
+   o_SPI_CS_n => ee_cs_n,
 	-- selection
 	selection => not game_select,
 	-- write trigger
@@ -769,7 +828,7 @@ port map(
 	pa_in	 => U4_pa_in or SW_Freeplay,
    pa_out => open,
    pb_in  => "00000000",
-	pb_out => U4_PB
+	pb_out => u4_pb_cpu
  );
 
 U5_RAM: entity work.RIOT_RAM
