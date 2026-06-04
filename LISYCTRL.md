@@ -1,0 +1,124 @@
+# lisyctrl — a LISYcontrol-style diagnostic bridge for GottFA80
+
+> Proposal + reference implementation for an open (GPL-3.0) ESP32 diagnostic /
+> control bridge, in the spirit of LISY's `lisy80_control`, for the GottFA80+
+> (Cyclone 10 LP) board. Intended for upstreaming.
+
+## Goal
+Let an ESP32 (WiFi, modern web UI) drive/read the machine hardware exactly like
+LISYcontrol does on a LISY Pi — but on GottFA the I/O belongs to the FPGA, so a
+small VHDL block (`lisyctrl`) exposes it over the **existing shared SPI bus**
+when a diagnostic mode is active (6502 held in reset).
+
+## Files
+| File | Role |
+|---|---|
+| `lib_common/spi_slave.vhd` | CS-less SPI mode-0 slave (idle-gap framed) |
+| `lib_common/lisyctrl.vhd`  | register file + switch scan + coil pulse(+watchdog) + lamp refresh + display |
+| `sim/tb_lisyctrl.vhd`      | self-checking testbench (GHDL/ModelSim) |
+
+## Simulate (no hardware needed)
+```sh
+ghdl -a lib_common/spi_slave.vhd lib_common/lisyctrl.vhd sim/tb_lisyctrl.vhd
+ghdl -e tb_lisyctrl && ghdl -r tb_lisyctrl
+```
+Expect `===== ALL TESTS PASSED =====` (ID/VER, CTRL r/w, switch readback, coil
+gts80 pulse + auto-clear, watchdog trip + re-arm).
+
+The **bus-sharing glue itself is validated**: `sim/sys80_glue.vhd` (= the SYS80
+changes below, isolated from the Altera megafunctions) + `sim/tb_integration.vhd`
+→ `INTEGRATION TESTS PASSED` — an external master reads a lisyctrl register over the
+shared **inout** bus end-to-end, plus normal-mode CLK/CS passthrough and CPU-hold.
+Run all three testbenches: `sh sim/run_all.sh`.
+
+## Why share the bus (no dedicated SPI)
+The X1P connector exposes no spare FPGA I/O. The only SPI pins are the SD/EEPROM
+bus (`CLK`/`MOSI`/`MISO` + `CS_SDcard`/`CS_EEprom`). So in diagnostic mode the
+FPGA **releases** that bus to the ESP and becomes an SPI **slave**:
+- `CLK`,`MOSI` → tri-stated by the FPGA, driven by the ESP (read by `lisyctrl`)
+- `MISO` → driven by the FPGA slave (SD+EEPROM held deselected → single driver)
+- no CS line free → the slave is **CS-less**, framed by an SCLK idle gap, and the
+  `active` flag is the global enable.
+
+## SYS80.vhd integration (the changes to review)
+1. **Entity port directions** (the one invasive change):
+   ```vhdl
+   MOSI : inout std_logic;   -- was: out
+   CLK  : inout std_logic;   -- was: out
+   MISO : inout std_logic;   -- was: in
+   ```
+2. **Instance** (new signals `lisy_*`):
+   ```vhdl
+   LISY: entity work.lisyctrl
+     port map( clk=>clk_50, active=>lisy_active,
+       sclk=>lisy_sclk, mosi=>lisy_mosi, miso=>lisy_miso,
+       o_U4_PB=>lisy_u4pb, i_U4_PA=>U4_pa_in,
+       o_U5_PA=>lisy_u5pa, o_U5_PB7=>lisy_u5pb7,
+       o_U6_PA=>lisy_u6pa, o_U6_PB=>lisy_u6pb, o_segments=>lisy_seg,
+       i_DIP_Ret=>DIP_Return, i_slam=>slam, wd_tripped=>open );
+   ```
+3. **Bus tri-state** (replaces the `MOSI/CLK` mux ~lines 342-343):
+   ```vhdl
+   CLK  <= 'Z' when lisy_active='1' else (SDcard_CLK  when reset_l='0' else EEprom_CLK);
+   MOSI <= 'Z' when lisy_active='1' else (SDcard_MOSI when reset_l='0' else EEprom_MOSI);
+   MISO <= lisy_miso when lisy_active='1' else 'Z';
+   lisy_sclk <= CLK;  lisy_mosi <= MOSI;          -- read ESP-driven lines
+   CS_SDcard <= '1' when lisy_active='1' else sd_cs_int;   -- deselect chips in diag
+   CS_EEprom <= '1' when lisy_active='1' else ee_cs_int;
+   ```
+   (route SD_Card / EEprom `o_SPI_CS_n` to `sd_cs_int` / `ee_cs_int`).
+4. **Hold the 6502** in diag:
+   ```vhdl
+   U1 (T65): Res_n => cpu_res_n;   cpu_res_n <= '0' when lisy_active='1' else reset_l;
+   ```
+5. **I/O output muxes** — `lisyctrl` emits RIOT-register semantics, so feed the
+   EXISTING conditioning from `lisy_*` when active (no polarity rework):
+   ```vhdl
+   -- example, U6_PA (lines ~670-671):
+   u6pa_src <= lisy_u6pa when lisy_active='1' else U6_pa_out;
+   U6_PA(4 downto 0) <= not u6pa_src(4 downto 0) when (game_running='1' or lisy_active='1') else "00000";
+   U6_PA(7 downto 5) <=     u6pa_src(7 downto 5) when (game_running='1' or lisy_active='1') else "111";
+   ```
+   Do the same pattern for `U6_PB`, `U4_PB`, `U5_PA(3..0)`, `disp_segments`.
+
+## Mode entry (`lisy_active`) — main open design point
+Recommended: **long-press of `reset_sw`** (> ~2 s) latches `lisy_active` (short
+press = normal reset); exit via an `outputs=0` + idle, a SPI "exit" command, or
+another long-press. The ESP confirms the take-over via the `Debug` line
+(FPGA→ESP) before driving the bus. This needs no extra pin. (Open to bontango's
+preference — could also be a DIP/test-button combo.)
+
+## SPI register map (2-byte frames)
+byte0 = `{bit7 R/W, bits6..0 addr}`, byte1 = data (read: value returned on MISO).
+
+| Addr | R/W | Name | Meaning |
+|---|---|---|---|
+| 0x00 | R | ID | 0x80 |
+| 0x01 | R | VER | 0x01 |
+| 0x02 | R | STATUS | b0 active, b1 wd_tripped, b2 is80B |
+| 0x03 | W | CTRL | b0 outputs_enabled, b1 lamp_blink |
+| 0x10-0x17 | R | SW_ROW[strobe] | bit = return, 1 = **closed** |
+| 0x18 | R | DIP/slam | b4..0 DIP_Return, b5 slam |
+| 0x20-0x25 | W/R | LAMP[0..5] | 48 lamp bits |
+| 0x30 | W | COIL | write coil # (1..9) → pulse |
+| 0x31 | W/R | PULSE_MS | coil pulse width (ms) |
+| 0x40-0x42 | W | SEG_A/B/C | display segments (1..24) |
+| 0x43 | W | U5 | b3..0 digit strobes, b7 switch-enable |
+
+Maps 1:1 onto LISY's model (L/C/S/D/V commands); the modern web UI on the ESP
+talks this over WebSocket.
+
+## Safety
+- `outputs_enabled` defaults **off** → no lamp/coil energizing until armed.
+- Coils auto-release after `PULSE_MS`; a **comms watchdog** (default 120 ms; pet
+  by any SPI traffic) forces solenoids to the safe value (`U6_PA=0x00`, all
+  enables off) if the ESP/WiFi stalls.
+- `f_coil(n)` is the **gts80 encode** (mimics the game ROM), so feeding the
+  existing conditioning fires the correct solenoid *by construction*.
+
+## TODO / confirm before hardware
+- **Lamp matrix group→latch (DS) addressing** in `P_LAMP` is best-effort — verify
+  against the SYS80 lamp decoders (IC11/IC13) + SN74175 chain.
+- **80B vs 80/80A** display handling + `is80B` status bit.
+- Final **mode-entry** mechanism (above).
+- Switch return polarity (currently: strobe-high + return-high = closed).

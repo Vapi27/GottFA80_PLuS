@@ -8,5 +8,10 @@
 !lib_cyclone_10/
 !lib_cyclone_IV/
 
+# lisyctrl contribution: testbenches + docs
+!sim/
+!LISYCTRL.md
+!NOR_FLASH.md
+
 # And not the .gitignore itself
 !.gitignore
