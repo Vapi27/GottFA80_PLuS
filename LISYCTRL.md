@@ -81,12 +81,13 @@ FPGA **releases** that bus to the ESP and becomes an SPI **slave**:
    ```
    Do the same pattern for `U6_PB`, `U4_PB`, `U5_PA(3..0)`, `disp_segments`.
 
-## Mode entry (`lisy_active`) — main open design point
-Recommended: **long-press of `reset_sw`** (> ~2 s) latches `lisy_active` (short
-press = normal reset); exit via an `outputs=0` + idle, a SPI "exit" command, or
-another long-press. The ESP confirms the take-over via the `Debug` line
-(FPGA→ESP) before driving the bus. This needs no extra pin. (Open to bontango's
-preference — could also be a DIP/test-button combo.)
+## Mode entry (`lisy_active`)
+**Implemented:** a **long-press of the Gottlieb door test switch** (`detect_test_sw`
+`long_push`, strobe 0 / return 7) latches `lisy_active`; any reset/reboot
+(`reset_l='0'`) exits it. The detector is active from attract/idle (its `rst` is
+`game_running`) — the usual place to run diagnostics. No extra pin; default OFF, so
+stock behaviour is unchanged until the button is held. (Open to bontango's
+preference — e.g. add a SPI/`Debug`-line exit, or a timeout.)
 
 ## SPI register map (2-byte frames)
 byte0 = `{bit7 R/W, bits6..0 addr}`, byte1 = data (read: value returned on MISO).

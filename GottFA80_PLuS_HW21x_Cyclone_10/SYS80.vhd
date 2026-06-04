@@ -230,6 +230,7 @@ signal lisy_sclk, lisy_mosi, lisy_miso : std_logic;
 signal lisy_u4pb, lisy_u6pa, lisy_u6pb : std_logic_vector(7 downto 0);
 signal u6pa_src, u6pb_src, u4_pb_cpu   : std_logic_vector(7 downto 0);
 signal sd_cs_n, ee_cs_n, cpu_res_n     : std_logic;
+signal lisy_trig : std_logic;   -- long-press of the Gottlieb door test switch
 
 
 begin
@@ -359,8 +360,17 @@ cpu_res_n <= '0' when lisy_active = '1' else reset_l;
 u6pa_src  <= lisy_u6pa when lisy_active = '1' else U6_pa_out;
 u6pb_src  <= lisy_u6pb when lisy_active = '1' else U6_pb_out;
 U4_PB     <= lisy_u4pb when lisy_active = '1' else u4_pb_cpu;
--- mode entry: PROPOSED long-press of reset_sw -- left to bontango; safe default OFF
-lisy_active <= '0';
+-- mode entry: a LONG-PRESS of the Gottlieb door test switch enters diag mode;
+-- any reset/reboot (reset_l='0') exits it. (lisy_trig = detect_test_sw long_push,
+-- which is active from attract/idle -- the usual place to run diagnostics.)
+LISY_MODE: process begin
+	wait until rising_edge(clk_50);
+	if reset_l = '0' then
+		lisy_active <= '0';
+	elsif lisy_trig = '1' then
+		lisy_active <= '1';
+	end if;
+end process;
 LISY_CTRL: entity work.lisyctrl
 port map(
 	clk => clk_50, active => lisy_active,
@@ -574,7 +584,7 @@ port map(
 	sw_return => U4_pa_in(7),
 	sw_enable => U5_pb_out(7),
 	short_push => test_sw,
-	long_push => open,
+	long_push => lisy_trig,   -- lisyctrl: long-press of the door test switch enters diag
 	rst 	=> game_running
 );
 
