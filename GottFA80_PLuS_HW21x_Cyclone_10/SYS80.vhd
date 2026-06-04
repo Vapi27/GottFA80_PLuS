@@ -26,6 +26,12 @@ use ieee.std_logic_1164.all;
 use IEEE.numeric_std.all;
 
 entity SYS80 is
+	generic(
+		-- compile-time include the lisyctrl diagnostic bridge (default on).
+		-- set false to recover ~522 LEs on a tight device; the shared-bus
+		-- muxes then constant-fold back to the stock SD/EEPROM behaviour.
+		lisy_enable : boolean := true
+	);
 	port(
 	   -- the FPGA board
 		clk_50	: in std_logic;
@@ -363,6 +369,7 @@ U4_PB     <= lisy_u4pb when lisy_active = '1' else u4_pb_cpu;
 -- mode entry: a LONG-PRESS of the Gottlieb door test switch enters diag mode;
 -- any reset/reboot (reset_l='0') exits it. (lisy_trig = detect_test_sw long_push,
 -- which is active from attract/idle -- the usual place to run diagnostics.)
+GEN_LISY: if lisy_enable generate
 LISY_MODE: process begin
 	wait until rising_edge(clk_50);
 	if reset_l = '0' then
@@ -380,6 +387,17 @@ port map(
 	o_U6_PA => lisy_u6pa, o_U6_PB => lisy_u6pb, o_segments => open,
 	i_DIP_Ret => '0' & DIP_Return, i_slam => slam, wd_tripped => open
 );
+end generate GEN_LISY;
+
+-- lisyctrl excluded: drive the shared signals to constants so the arbitration
+-- muxes fold to stock (lisy_active='0' => MISO=Z/input, MOSI/CLK=SD or EEPROM).
+GEN_NOLISY: if not lisy_enable generate
+	lisy_active <= '0';
+	lisy_miso   <= 'Z';
+	lisy_u4pb   <= (others => '0');
+	lisy_u6pa   <= (others => '0');
+	lisy_u6pb   <= (others => '0');
+end generate GEN_NOLISY;
 
 ---------------------
 -- count ints
