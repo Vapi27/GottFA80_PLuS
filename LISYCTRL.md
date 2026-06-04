@@ -32,8 +32,11 @@ shared **inout** bus end-to-end, plus normal-mode CLK/CS passthrough and CPU-hol
 Run all three testbenches: `sh sim/run_all.sh`.
 
 ## Validated on the real toolchain
-Built with **Quartus Prime Lite 22.1std.0 (Build 915)** for the exact target
-`10CL006YE144C8G` — the full flow passes end-to-end on the integrated `SYS80`:
+Built with **Quartus Prime Lite 22.1std.0 (Build 915)** for **both** project
+variants — `10CL006YE144C8G` (Cyclone 10 LP) and `EP4CE6E22C8` (Cyclone IV E) —
+the full flow passes end-to-end on the integrated `SYS80`. The table below is the
+Cyclone 10 build; the Cyclone IV build is equivalent (5,729 LEs / 91 %, setup
+slack +5.47 ns, its own `SYS80.sof` generated, 0 errors):
 
 | Stage | Result |
 |---|---|
