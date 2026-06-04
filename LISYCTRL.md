@@ -31,6 +31,35 @@ changes below, isolated from the Altera megafunctions) + `sim/tb_integration.vhd
 shared **inout** bus end-to-end, plus normal-mode CLK/CS passthrough and CPU-hold.
 Run all three testbenches: `sh sim/run_all.sh`.
 
+## Validated on the real toolchain
+Built with **Quartus Prime Lite 22.1std.0 (Build 915)** for the exact target
+`10CL006YE144C8G` — the full flow passes end-to-end on the integrated `SYS80`:
+
+| Stage | Result |
+|---|---|
+| Analysis & Synthesis | **0 errors** — 3 bidirectional pins inferred (the shared SPI bus) |
+| Fitter (place & route) | **0 errors** — router 14 % avg / 21 % peak interconnect |
+| Assembler | **0 errors** → `SYS80.sof` bitstream generated |
+| Timing (STA) | **met** — worst setup slack +4.94 ns, hold +0.40 ns (all corners positive) |
+
+Resource impact of lisyctrl, vs the pristine `main` (same device, same flow):
+
+| | baseline | + lisyctrl | delta |
+|---|---|---|---|
+| Logic elements | 5,179 (83 %) | 5,701 (91 %) | **+522 (+8 %)** |
+| &nbsp;&nbsp;combinational | 4,858 | 5,351 | +493 |
+| &nbsp;&nbsp;registers | 1,853 | 2,153 | +300 |
+| Pins | 84 | 84 | **+0** |
+| Memory bits | 139,264 | 139,264 | **+0** |
+
+So lisyctrl costs ~522 LEs and **no extra pins and no extra memory** — it reuses
+the existing shared SPI bus and the door test switch — and the design still fits
+the 10CL006 with timing met. (`MOSI`/`MISO`/`CLK` land back on their original
+pins 42/34/39, now as bidirectional.) The `sim/` GHDL testbenches validate the
+logic and bus-sharing behaviourally; this section validates synthesis/fit/timing
+on Intel's tools. The remaining gate before merge is on-machine hardware
+bring-up (with the ESP32 companion).
+
 ## Why share the bus (no dedicated SPI)
 The X1P connector exposes no spare FPGA I/O. The only SPI pins are the SD/EEPROM
 bus (`CLK`/`MOSI`/`MISO` + `CS_SDcard`/`CS_EEprom`). So in diagnostic mode the
