@@ -1,0 +1,56 @@
+-- boot message on Gottlieb Display
+-- 80B Version
+-- part of  GottFA80
+-- bontango 01.2026
+--
+-- v 1.0 initial version
+-- 895KHz input clock
+
+LIBRARY ieee;
+USE ieee.std_logic_1164.all;
+
+LIBRARY ieee;
+USE ieee.std_logic_1164.all;
+
+    entity boot_message_80B is        
+        port(
+            clk_in  : in std_logic;               						
+			show		: in std_logic;     
+			SD_error : in std_logic;     
+			--output (display control)
+			data	: out std_logic_vector(3 downto 0);
+			LD1 : out std_logic;     
+			LD2 : out std_logic;     
+			D_Reset : out std_logic;     
+			-- input (display data)
+			display1 : in  string(1 to 20);
+			display2 : in  string(1 to 20);
+			error_disp2 : in  string(1 to 20)
+            );
+    end boot_message_80B;
+    ---------------------------------------------------
+    architecture Behavioral of _80B is
+		signal count : integer range 0 to 17000 := 0;
+	begin
+		
+	
+	boot_message_80B: process (clk_in, show, display1, display2, error_disp2)
+    begin
+		if rising_edge(clk_in) then	
+			if show = '0' then --Reset condidition (reset_l)    				
+				count <= 0;
+			else			
+				-- inc count for next round
+				count <= count +1;
+				case count is 				--895KHz input we have a clk each 1,1us
+												-- we do a refresh each 1.1ms
+				when 15000 =>
+					count <= 0;					
+				when 16000 =>
+					count <= 0;
+				when OTHERS =>
+				end case;
+			end if; -- show
+		end if;	--rising edge		
+		end process;
+    end Behavioral;

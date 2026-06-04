@@ -1,0 +1,12 @@
+# Ignore everything at root level
+/*
+
+# Except the project directories
+!GottFA80_PLuS_HW21x_Cyclone_10/
+!GottFA80_PLuS_HW21x_Cyclone_IV_v4/
+!lib_common/
+!lib_cyclone_10/
+!lib_cyclone_IV/
+
+# And not the .gitignore itself
+!.gitignore
