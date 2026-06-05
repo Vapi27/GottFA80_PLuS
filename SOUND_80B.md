@@ -6,6 +6,35 @@ SC-01 speech) plus an MP3/DFPlayer path for speech/samples. Per lisy.dev, integr
 sound currently works for **3 early 80B games** (Bounty Hunter, Chicago Cubs Triple
 Play, Tag Team); the rest of System 80B is **work in progress** (bontango).
 
+## ✅ Decision: GOSOWAV (WAV samples) — the 10CL006-viable path
+The faithful-emulation route (below) does **not** fit the 10CL006 (see the fit
+constraint). The route that DOES fit is **GOSOWAV** — bontango's existing WAV-trigger
+sound board: it plays recorded WAV samples selected by the MPU's sound command, so it
+needs **no chip emulation**. "Make 80B sound work" then = capture the command + map
+each command to a sample (per game).
+
+**RE of the original boards** (from PinMAME `gts80s.c` / `gts80.c`, bundled in
+`lisy_5_28/src/wpc`):
+- **The MPU sound command is 5-bit** (a nibble + 1 bit), strobed — `gts80.c`
+  `GTS80_sndCmd_w` and the `SNDBRD_GTS80B` encoding `(lampMatrix[0]&0x10) | (data&0x0f)`.
+  GottFA80 **already captures this** as `Sound_Meta` (S1,S2,S4,S8,S16) — the same 5
+  lines for 80/80A and 80B. So the command capture is essentially done.
+- **80B sound board** = 2× 6502 + DAC + speech (**SP0250**, Gen-1) + a music chip that
+  is **AY-8913 / AY-3-8912** (some gens) **or YM2151** (later gens); 3 generations +
+  an extra DAC board for Bone Busters.
+- The per-game richness is the board's own ROM/CPU turning 32 commands into many
+  sounds/sequences — for GOSOWAV that's a **per-game command→WAV table + the samples**.
+
+**Remaining work for the GOSOWAV path:** (a) per-game WAV sample sets — which can be
+**rendered by PinMAME itself** (it emulates these boards, right here in `lisy_5_28`) by
+capturing each command's audio; (b) the GOSOWAV player (bontango's board, or a light
+FPGA/ESP WAV mixer); (c) the per-game command→sample map. **Almost no new FPGA logic,
+and it fits the 10CL006.**
+
+> The `ay_3_8910.vhd` core in this repo is therefore for the **faithful** route only
+> (an AY-based 80B generation or System 3, on a *bigger* FPGA). It's validated and
+> reusable, but the GOSOWAV path on the 10CL006 does not need it.
+
 ## Why the late 80B board is hard
 The later System 80B "Sound & Speech" board is a dual-processor design:
 **2× 6502, 2× AY-3-8912 PSG, an "Orator" speech chip, and a DAC.** GOSOF80 has no
