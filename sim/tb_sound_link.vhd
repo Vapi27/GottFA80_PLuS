@@ -13,14 +13,17 @@ architecture sim of tb_sound_link is
   constant BITT   : time := 10 * CP;        -- DIV = clk_hz/baud = 1e6/1e5 = 10 clk per bit
   signal clk   : std_logic := '0';
   signal rst   : std_logic := '1';
+  signal diag  : std_logic := '0';
   signal sound : std_logic_vector(4 downto 0) := (others => '0');
   signal game  : std_logic_vector(5 downto 0) := (others => '0');
   signal tx    : std_logic;
   signal done  : boolean := false;
 begin
+  -- hb_ms huge so the heartbeat never fires during this short test (we test the
+  -- change-driven mode token instead).
   DUT : entity work.sound_link
-    generic map ( clk_hz => 1000000, baud => 100000 )
-    port map ( clk => clk, rst => rst, sound => sound, game => game, tx => tx );
+    generic map ( clk_hz => 1000000, baud => 100000, hb_ms => 100000 )
+    port map ( clk => clk, rst => rst, diag => diag, sound => sound, game => game, tx => tx );
 
   clk <= not clk after CP/2 when not done else '0';
 
@@ -39,6 +42,11 @@ begin
     rst <= '1'; wait for 100 ns; wait until rising_edge(clk); rst <= '0';
     wait for 50 ns;
 
+    -- after reset the link announces the current mode first (diag=0 -> 0xF0)
+    rxb(b);
+    assert b = x"F0" report "FAIL initial mode byte = " & integer'image(to_integer(unsigned(b))) severity failure;
+    report "PASS initial mode 0xF0";
+
     game <= "000011";             -- game 3 -> expect 0x40 | 3 = 0x43
     rxb(b);
     assert b = x"43" report "FAIL game byte = " & integer'image(to_integer(unsigned(b))) severity failure;
@@ -48,6 +56,11 @@ begin
     rxb(b);
     assert b = x"85" report "FAIL sound byte = " & integer'image(to_integer(unsigned(b))) severity failure;
     report "PASS sound 0x85";
+
+    diag <= '1';                  -- enter diag -> expect mode token 0xF0 | 1 = 0xF1
+    rxb(b);
+    assert b = x"F1" report "FAIL diag-on token = " & integer'image(to_integer(unsigned(b))) severity failure;
+    report "PASS diag token 0xF1";
 
     report "===== SOUND_LINK TESTS PASSED =====";
     done <= true; wait;

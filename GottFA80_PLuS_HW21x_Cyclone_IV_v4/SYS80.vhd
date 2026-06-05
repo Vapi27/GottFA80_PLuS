@@ -31,7 +31,8 @@ entity SYS80 is
 		-- compile-time include the lisyctrl diagnostic bridge (default on).
 		-- set false to recover ~522 LEs on a tight device; the shared-bus
 		-- muxes then constant-fold back to the stock SD/EEPROM behaviour.
-		lisy_enable : boolean := true
+		lisy_enable : boolean := true;
+		esp_sound   : boolean := false  -- true = ESP/GOSOWAV sound (drop GOSOF80+DFPlayer)
 	);
 	port(
 	   -- the FPGA board
@@ -240,6 +241,7 @@ signal sd_cs_n, ee_cs_n, cpu_res_n     : std_logic;
 signal lisy_trig : std_logic;   -- long-press of the Gottlieb door test switch
 signal lisy_sound5     : std_logic_vector(4 downto 0);  -- lisyctrl sound code -> gosof80
 signal lisy_sound_trig : std_logic;                     -- lisyctrl sound trigger -> gosof80
+signal sl_tx           : std_logic;                     -- sound_link UART (ESP sound mode)
 
 
 begin
@@ -366,7 +368,12 @@ lisy_mosi <= MOSI;
 -- handshake to the ESP32 companion on the Debug pin: '1' = lisyctrl/diag mode is
 -- active => the shared SPI bus is released to the ESP (FPGA is now an SPI slave,
 -- 6502 held in reset, SD/EEPROM deselected). The ESP polls this before driving.
+-- In the ESP-sound build, Debug is instead driven by the sound_link UART (it carries
+-- the diag token + sound/game) -- see GEN_ESP_SND. So only drive the level here when
+-- esp_sound is off (stock / PIN-2-sound builds).
+GEN_DBG_LVL: if not esp_sound generate
 Debug <= lisy_active;
+end generate GEN_DBG_LVL;
 CS_SDcard <= '1' when lisy_active = '1' else sd_cs_n;
 CS_EEprom <= '1' when lisy_active = '1' else ee_cs_n;
 cpu_res_n <= '0' when lisy_active = '1' else reset_l;
@@ -971,6 +978,7 @@ port map(
 );
 
 
+GEN_FPGA_SND : if not esp_sound generate
 SOUNDBOARD: entity work.gosof80
 port map(
 		clk_50	=> clk_50,
@@ -1008,7 +1016,27 @@ port map(
 		soundrom1_dout => soundrom1_dout,
 		soundrom2_dout => soundrom2_dout
 		
-	); 	
+	);
+end generate GEN_FPGA_SND;
+
+GEN_ESP_SND : if esp_sound generate
+-- ESP/GOSOWAV is the sound source: GOSOF80 + DFPlayer dropped. A single UART on the
+-- Debug pin (PIN_11 / K2, right next to the FPGA) carries the diag-mode token + the
+-- live sound# + game# to the ESP (diag and gameplay sound never overlap). The audio
+-- pins Audio_RX (PIN_2) and Sound (PIN_7) are freed -> tie them off.
+SND_LINK : entity work.sound_link
+port map(
+	clk => clk_50, rst => not reset_l,
+	diag => lisy_active,
+	sound => Sound_S16 & Sound_S8 & Sound_S4 & Sound_S2 & Sound_S1,
+	game => game_select,
+	tx => sl_tx
+);
+Debug    <= sl_tx;
+Audio_RX <= '1';
+Sound    <= '0';
+end generate GEN_ESP_SND;
+ 	
 	
 	
 end rtl;
