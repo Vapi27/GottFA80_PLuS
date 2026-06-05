@@ -20,7 +20,9 @@
 --   R 0x10..0x17 SW_ROW[strobe] (bit=return, 1=closed)   R 0x18 DIP/slam
 --   W 0x20..0x25 LAMP[0..5] (48 bits)
 --   W 0x30 COIL (write coil# 1..9 -> pulse)   W 0x31 PULSE_MS
+--   R 0x32 COIL_FAULT {b0 pulse-clamped,b1 refire-blocked,b2 wd-with-coil; b7..4 coil#}; W clears
 --   W 0x40..0x42 SEG_A/B/C (display segments)  W 0x43 U5 {b3..0 strobes, b7 sw_enable}
+--   W 0x44 SOUND (write System 80 sound code 0..31 -> play via gosof80)
 
 library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
@@ -31,7 +33,10 @@ entity lisyctrl is
     clk_hz        : integer := 50000000;
     wd_timeout_ms : integer := 120;        -- coil/output comms watchdog
     gap_clocks    : integer := 64;         -- SPI frame gap (passed to spi_slave)
-    scan_div      : integer := 5000        -- clk cycles per switch strobe (~100us)
+    scan_div      : integer := 5000;       -- clk cycles per switch strobe (~100us)
+    max_pulse_ms  : integer := 150;        -- hard ceiling on a coil pulse (thermal guard)
+    refire_ms     : integer := 40;         -- min off-time between coil fires (anti machine-gun)
+    sound_hold_ms : integer := 60          -- ms to hold the sound trigger high (level send)
   );
   port (
     clk        : in  std_logic;
@@ -48,6 +53,8 @@ entity lisyctrl is
     o_U6_PA    : out std_logic_vector(7 downto 0);   -- solenoids + sound
     o_U6_PB    : out std_logic_vector(7 downto 0);   -- lamps (4 data + 4 strobe)
     o_segments : out std_logic_vector(1 to 24);      -- display segments
+    o_sound      : out std_logic_vector(4 downto 0); -- System 80 sound code 0..31 -> gosof80
+    o_sound_trig : out std_logic;                    -- level: high triggers a sound send
     i_DIP_Ret  : in  std_logic_vector(4 downto 0);
     i_slam     : in  std_logic;
     wd_tripped : out std_logic
@@ -86,9 +93,15 @@ architecture rtl of lisyctrl is
   constant WD_MAX : integer := wd_timeout_ms;          -- counted in ms ticks
   signal ms_div   : integer range 0 to MS_MAX := MS_MAX;
 
-  -- coil pulse
+  -- coil pulse + protection
   signal coil_n     : integer range 0 to 15 := 0;
   signal pulse_left : integer range 0 to 255 := 0;
+  signal refire_cnt : integer range 0 to refire_ms := 0;      -- cooldown after a pulse
+  signal coil_fault : std_logic_vector(7 downto 0) := x"00";  -- b0 clamp,b1 refire,b2 wd; b7..4 coil#
+
+  -- sound (System 80 5-bit code -> gosof80, level-triggered)
+  signal snd_code   : std_logic_vector(4 downto 0) := "00000";
+  signal snd_hold   : integer range 0 to sound_hold_ms := 0;  -- ms left holding the trigger high
 
   -- watchdog
   signal wd_cnt  : integer range 0 to 65535 := WD_MAX;
@@ -142,6 +155,7 @@ begin
     if active = '0' then
       cmd_seen <= '0'; coil_n <= 0; pulse_left <= 0;
       wd_cnt <= WD_MAX; wd_trip <= '0';
+      refire_cnt <= 0; snd_hold <= 0; coil_fault <= x"00";
     else
       -- 1 ms time base
       if ms_div = 0 then ms_div <= MS_MAX; ms_now := true;
@@ -159,9 +173,22 @@ begin
           case a is
             when 16#03# => ctrl     <= rx_byte;
             when 16#31# => pulse_ms <= rx_byte;
-            when 16#30# =>                            -- fire a coil
-              coil_n     <= to_integer(unsigned(rx_byte));
-              pulse_left <= to_integer(unsigned(pulse_ms));
+            when 16#30# =>                            -- fire a coil (guarded)
+              if to_integer(unsigned(rx_byte)) = 0 then
+                coil_n <= 0; pulse_left <= 0;          -- explicit off
+              elsif refire_cnt /= 0 then
+                coil_fault <= rx_byte(3 downto 0) & "0010";   -- b1: re-fire blocked (cooldown)
+              else
+                coil_n <= to_integer(unsigned(rx_byte));
+                if to_integer(unsigned(pulse_ms)) > max_pulse_ms then
+                  pulse_left <= max_pulse_ms;
+                  coil_fault <= rx_byte(3 downto 0) & "0001";  -- b0: pulse clamped to max
+                else
+                  pulse_left <= to_integer(unsigned(pulse_ms));
+                end if;
+              end if;
+            when 16#32# => coil_fault <= x"00";        -- write clears coil-fault flags
+            when 16#44# => snd_code <= rx_byte(4 downto 0); snd_hold <= sound_hold_ms;  -- play sound
             when 16#20# to 16#25# => lamp_b(a - 16#20#) <= rx_byte;
             when 16#40# to 16#42# => seg_b (a - 16#40#) <= rx_byte;
             when 16#43# => u5_reg <= rx_byte;
@@ -170,15 +197,21 @@ begin
         end if;
       end if;
 
-      -- coil pulse timer + watchdog (per ms)
+      -- coil pulse timer + cooldown + sound-hold + watchdog (per ms)
       if ms_now then
+        if refire_cnt > 0 then refire_cnt <= refire_cnt - 1; end if;
+        if snd_hold   > 0 then snd_hold   <= snd_hold   - 1; end if;
         if pulse_left > 0 then
           pulse_left <= pulse_left - 1;
-          if pulse_left = 1 then coil_n <= 0; end if;
+          if pulse_left = 1 then coil_n <= 0; refire_cnt <= refire_ms; end if;  -- arm cooldown
         end if;
         if outputs_en = '1' then
           if wd_cnt > 0 then wd_cnt <= wd_cnt - 1;
-          else wd_trip <= '1'; coil_n <= 0; pulse_left <= 0; end if;
+          else
+            wd_trip <= '1';
+            if coil_n /= 0 then coil_fault <= std_logic_vector(to_unsigned(coil_n, 4)) & "0100"; end if;
+            coil_n <= 0; pulse_left <= 0;
+          end if;
         end if;
       end if;
     end if;
@@ -242,7 +275,7 @@ begin
   ----------------------------------------------------------------------------
   -- read-back mux
   ----------------------------------------------------------------------------
-  P_RD : process (cmd_addr, ctrl, active, wd_trip, sw_row, i_DIP_Ret, i_slam, pulse_ms, lamp_b)
+  P_RD : process (cmd_addr, ctrl, active, wd_trip, sw_row, i_DIP_Ret, i_slam, pulse_ms, lamp_b, coil_fault)
     variable a : integer;
   begin
     a := to_integer(cmd_addr);
@@ -255,6 +288,7 @@ begin
       when 16#18# => reg_rd <= "00" & i_slam & i_DIP_Ret;
       when 16#20# to 16#25# => reg_rd <= lamp_b(a - 16#20#);
       when 16#31# => reg_rd <= pulse_ms;
+      when 16#32# => reg_rd <= coil_fault;
       when others => reg_rd <= x"00";
     end case;
   end process;
@@ -271,6 +305,10 @@ begin
   o_segments(17 to 24) <= seg_b(2);
   o_U5_PA   <= u5_reg(3 downto 0);
   o_U5_PB7  <= u5_reg(7);
+
+  -- sound: present the code + a level trigger (held sound_hold_ms) -> gosof80
+  o_sound      <= snd_code;
+  o_sound_trig <= '1' when snd_hold > 0 else '0';
 
   wd_tripped <= wd_trip;
 

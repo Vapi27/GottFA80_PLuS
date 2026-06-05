@@ -238,6 +238,8 @@ signal lisy_u4pb, lisy_u6pa, lisy_u6pb : std_logic_vector(7 downto 0);
 signal u6pa_src, u6pb_src, u4_pb_cpu   : std_logic_vector(7 downto 0);
 signal sd_cs_n, ee_cs_n, cpu_res_n     : std_logic;
 signal lisy_trig : std_logic;   -- long-press of the Gottlieb door test switch
+signal lisy_sound5     : std_logic_vector(4 downto 0);  -- lisyctrl sound code -> gosof80
+signal lisy_sound_trig : std_logic;                     -- lisyctrl sound trigger -> gosof80
 
 
 begin
@@ -390,6 +392,7 @@ port map(
 	o_U4_PB => lisy_u4pb, i_U4_PA => U4_pa_in,
 	o_U5_PA => open, o_U5_PB7 => open,
 	o_U6_PA => lisy_u6pa, o_U6_PB => lisy_u6pb, o_segments => open,
+	o_sound => lisy_sound5, o_sound_trig => lisy_sound_trig,
 	i_DIP_Ret => '0' & DIP_Return, i_slam => slam, wd_tripped => open
 );
 end generate GEN_LISY;
@@ -984,6 +987,10 @@ port map(
 		Sound_Meta(2) => Sound_S4,
 		Sound_Meta(3) => Sound_S8,
 		Sound_Meta(4) => Sound_S16,
+		-- lisyctrl direct sound inject (diag mode)
+		lisy_active => lisy_active,
+		lisy_sound  => lisy_sound5,
+		lisy_trig   => lisy_sound_trig,
 		
 		--Soundboard Options S1 DIPs 1..6
 		SB_Opt => sb_option(1) & sb_option(2) & sb_option,

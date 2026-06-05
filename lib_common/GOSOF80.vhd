@@ -18,7 +18,12 @@ entity gosof80 is
 		
 		-- Sound input S1,S2,S4,S8,S16
 		Sound_Meta :	in 	std_logic_vector(4 downto 0);
-		
+
+		-- lisyctrl direct sound inject (diag mode): play lisy_sound while lisy_trig is high
+		lisy_active : in std_logic := '0';
+		lisy_sound  : in std_logic_vector(4 downto 0) := "00000";
+		lisy_trig   : in std_logic := '0';
+
 		--Soudnboard Options S1 DIPs 1..6
 		SB_Opt :	in 	std_logic_vector(1 to 6);
 		
@@ -164,7 +169,7 @@ port map(
 			DFcmd_par2 => DFcmd_par2,
          send_flag => send_flag,
          clk => clk_50,
-         rst => game_running, --to prevent garbage at start which will crash newer player modules
+         rst => game_running or lisy_active, --out of reset when the game runs OR in lisy diag mode
          txd => DFP_tx			
 );
 
@@ -304,10 +309,12 @@ DFcmd_cmd <= X"0F"; -- cmd for folder to playback
 
 -- DFcmd_par1 with game_sel
 
-DFcmd_par2 <=  attract_sound when attract_send_flag = '1'
+DFcmd_par2 <=  "000" & lisy_sound when lisy_active = '1'
+               else attract_sound when attract_send_flag = '1'
 					  else "000" & Sound_meta;
 
-send_flag <= riot_pa_i(7) when speech_ctrl(to_integer(unsigned(Sound_meta))) = '0' else
+send_flag <= lisy_trig when lisy_active = '1' else
+             riot_pa_i(7) when speech_ctrl(to_integer(unsigned(Sound_meta))) = '0' else
 				  attract_send_flag;
 	
 				
