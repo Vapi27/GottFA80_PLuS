@@ -122,8 +122,10 @@ FPGA **releases** that bus to the ESP and becomes an SPI **slave**:
 `long_push`, strobe 0 / return 7) latches `lisy_active`; any reset/reboot
 (`reset_l='0'`) exits it. The detector is active from attract/idle (its `rst` is
 `game_running`) — the usual place to run diagnostics. No extra pin; default OFF, so
-stock behaviour is unchanged until the button is held. (Open to bontango's
-preference — e.g. add a SPI/`Debug`-line exit, or a timeout.)
+stock behaviour is unchanged until the button is held. The `Debug` pin is driven
+`<= lisy_active` so the ESP companion knows when the shared SPI bus has been
+released to it. (Open to bontango's preference — e.g. add a SPI/`Debug`-line exit,
+or a timeout.)
 
 ## SPI register map (2-byte frames)
 byte0 = `{bit7 R/W, bits6..0 addr}`, byte1 = data (read: value returned on MISO).
@@ -139,8 +141,10 @@ byte0 = `{bit7 R/W, bits6..0 addr}`, byte1 = data (read: value returned on MISO)
 | 0x20-0x25 | W/R | LAMP[0..5] | 48 lamp bits |
 | 0x30 | W | COIL | write coil # (1..9) → pulse |
 | 0x31 | W/R | PULSE_MS | coil pulse width (ms) |
+| 0x32 | R/W | COIL_FAULT | b0 pulse-clamped, b1 re-fire-blocked, b2 watchdog-with-coil; b7..4 coil#. Write clears |
 | 0x40-0x42 | W | SEG_A/B/C | display segments (1..24) |
 | 0x43 | W | U5 | b3..0 digit strobes, b7 switch-enable |
+| 0x44 | W | SOUND | write System 80 sound code (0..31) → play via gosof80 |
 
 Maps 1:1 onto LISY's model (L/C/S/D/V commands); the modern web UI on the ESP
 talks this over WebSocket.
@@ -150,6 +154,12 @@ talks this over WebSocket.
 - Coils auto-release after `PULSE_MS`; a **comms watchdog** (default 120 ms; pet
   by any SPI traffic) forces solenoids to the safe value (`U6_PA=0x00`, all
   enables off) if the ESP/WiFi stalls.
+- **Coil thermal/duty guard** (the board has *no* current sensor): every pulse is
+  hard-clamped to `max_pulse_ms` (default 150), a `refire_ms` cooldown (default 40)
+  blocks machine-gunning one coil, and any guard trip latches `COIL_FAULT` (0x32)
+  with the coil #. True over-current/short *detection* needs an added current-sense
+  shunt read by the ESP ADC (optional, in the firmware) — this FPGA-side guard
+  protects the drivers regardless.
 - `f_coil(n)` is the **gts80 encode** (mimics the game ROM), so feeding the
   existing conditioning fires the correct solenoid *by construction*.
 
