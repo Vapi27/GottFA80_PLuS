@@ -14,4 +14,8 @@ echo "== integration (inout bus sharing) =="
 ghdl -a lib_common/spi_slave.vhd lib_common/lisyctrl.vhd sim/sys80_glue.vhd sim/tb_integration.vhd
 ghdl -e tb_integration
 ghdl -r tb_integration --stop-time=20ms
+echo "== ay_3_8910 (PSG for 80B / System 3) =="
+ghdl -a lib_common/ay_3_8910.vhd sim/tb_ay_3_8910.vhd
+ghdl -e tb_ay_3_8910
+ghdl -r tb_ay_3_8910 --stop-time=3ms
 echo "== ALL SIMS DONE =="

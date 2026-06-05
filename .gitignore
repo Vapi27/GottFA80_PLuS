@@ -12,6 +12,7 @@
 !sim/
 !LISYCTRL.md
 !NOR_FLASH.md
+!SOUND_80B.md
 
 # And not the .gitignore itself
 !.gitignore
