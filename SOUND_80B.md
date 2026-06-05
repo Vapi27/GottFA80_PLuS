@@ -76,3 +76,25 @@ for a larger device or a System 3 build.
 8. **Diagnostic 80B sound** in lisyctrl (widen `SOUND` to the 80B command width).
 9. **Fit / validate** (pick the device per the table) + hardware test with real ROMs.
 10. **Coordinate with bontango** — this is his active WIP; align before a PR.
+
+## Runtime sound link: FPGA → ESP (built + validated; one pin decision left)
+The GOSOWAV runtime chain — FPGA captures the 5-bit sound command → sends it to the
+ESP → ESP plays `<game>/<sound>.wav` — is built and validated end-to-end except the
+final SYS80 pin:
+- **`lib_common/sound_link.vhd`** (FPGA): a 1-wire 8N1 UART emitting the live sound#
+  (`0x80|s`) and game# (`0x40|g`) on change; ghdl self-test in `run_all.sh`.
+- **ESP `soundlink` + `wavplayer`** (in `gottfa-esp32`): receive the UART, pick the
+  theme, stream + mix the WAV. Host-tested + builds.
+
+**Wiring it into SYS80 — the pin constraint (measured on Quartus 22.1):**
+- Instantiating `sound_link` (tap `Sound_S16..S1` + `game_select`) and routing `tx` to a
+  *new* `sound_tx` pin **fits the Cyclone IV variant** (EP4CE6: 93 % LE, pin placed) but
+  **NOT the 10CL006 as a new pin**: the device runs out of output-capable pins
+  (I/O-bank-5 output overflow) and LE reaches 97 %.
+- So on the **10CL006**, `sound_tx` must **reuse an existing output pin**. Natural choice:
+  **`Audio_RX` (PIN_2)** — the FPGA→DFPlayer UART — which is free exactly when the
+  ESP/GOSOWAV is the sound source (it *replaces* the on-board DFPlayer). i.e. drop the
+  DFPlayer driver and emit `sound_tx` on PIN_2. (Or repurpose `Sound`/PIN_7.)
+- This is a board-architecture choice (ESP-sound vs on-board DFPlayer), so the tree keeps
+  `sound_link` as a ready module; when committing to the ESP-sound build: instantiate it,
+  `tx => sound_tx`, assign PIN_2, and remove the gosof80 `DFP_tx => Audio_RX` driver.
