@@ -18,4 +18,8 @@ echo "== ay_3_8910 (PSG for 80B / System 3) =="
 ghdl -a lib_common/ay_3_8910.vhd sim/tb_ay_3_8910.vhd
 ghdl -e tb_ay_3_8910
 ghdl -r tb_ay_3_8910 --stop-time=3ms
+echo "== sound_link (FPGA->ESP UART: sound# + game#) =="
+ghdl -a lib_common/sound_link.vhd sim/tb_sound_link.vhd
+ghdl -e tb_sound_link
+ghdl -r tb_sound_link --stop-time=2ms
 echo "== ALL SIMS DONE =="
