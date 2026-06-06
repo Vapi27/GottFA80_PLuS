@@ -151,6 +151,7 @@ signal ta_value			: unsigned(23 downto 0);
 signal ta_dead			: std_logic;
 signal bm_disp1			: string(1 to 7);
 signal bm_show			: std_logic;
+signal ta_rst			: std_logic;            -- = not reset_l (active-high reset for tourney_display_top)
 signal u6pa_masked		: std_logic_vector(7 downto 0);
 
 -- RIOT U& Solenoid & Lamp Control
@@ -273,9 +274,10 @@ opt_slam_fix_close		<= not game_option(4);
 -- boot message
 ----------------------
 -- Tournament time-attack: countdown subsystem -> shows on display1 during a time-attack game (Pstore)
+ta_rst <= not reset_l;
 TADISP: entity work.tourney_display_top
 	generic map ( WIDTH => 24, START_VAL => 1000000, DECAY => 10000, TICK_DIV => 50000000 )
-	port map ( clk => clk_50, rst => not reset_l, game_running => game_running,
+	port map ( clk => clk_50, rst => ta_rst, game_running => game_running,
 	           tournament_mode => tournament_mode, arm => ta_arm, dstr => ta_dstr,
 	           final_value => ta_value, dead => ta_dead );
 bm_disp1 <= ta_dstr when ta_arm = '1' else "    611";               -- countdown when armed, else SW version
@@ -1052,6 +1054,7 @@ port map(
 	diag => lisy_active,
 	sound => Sound_S16 & Sound_S8 & Sound_S4 & Sound_S2 & Sound_S1,
 	game => game_select,
+	game_running => game_running,                     -- tournament auto-timer (0xF2/0xF3 to ESP)
 	tx => sl_tx
 );
 Debug    <= sl_tx;

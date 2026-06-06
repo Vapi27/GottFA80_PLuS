@@ -16,6 +16,7 @@ architecture sim of tb_sound_link is
   signal diag  : std_logic := '0';
   signal sound : std_logic_vector(4 downto 0) := (others => '0');
   signal game  : std_logic_vector(5 downto 0) := (others => '0');
+  signal game_running : std_logic := '0';
   signal tx    : std_logic;
   signal done  : boolean := false;
 begin
@@ -23,7 +24,8 @@ begin
   -- change-driven mode token instead).
   DUT : entity work.sound_link
     generic map ( clk_hz => 1000000, baud => 100000, hb_ms => 100000 )
-    port map ( clk => clk, rst => rst, diag => diag, sound => sound, game => game, tx => tx );
+    port map ( clk => clk, rst => rst, diag => diag, sound => sound, game => game,
+               game_running => game_running, tx => tx );
 
   clk <= not clk after CP/2 when not done else '0';
 
@@ -61,6 +63,16 @@ begin
     rxb(b);
     assert b = x"F1" report "FAIL diag-on token = " & integer'image(to_integer(unsigned(b))) severity failure;
     report "PASS diag token 0xF1";
+
+    game_running <= '1';          -- game starts -> expect game-state 0xF2 | 1 = 0xF3
+    rxb(b);
+    assert b = x"F3" report "FAIL game-running byte = " & integer'image(to_integer(unsigned(b))) severity failure;
+    report "PASS game-running 0xF3";
+
+    game_running <= '0';          -- game over -> expect 0xF2
+    rxb(b);
+    assert b = x"F2" report "FAIL game-over byte = " & integer'image(to_integer(unsigned(b))) severity failure;
+    report "PASS game-over 0xF2";
 
     report "===== SOUND_LINK TESTS PASSED =====";
     done <= true; wait;
