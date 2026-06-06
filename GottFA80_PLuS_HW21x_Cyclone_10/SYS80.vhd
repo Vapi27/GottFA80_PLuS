@@ -31,7 +31,11 @@ entity SYS80 is
 		-- set false to recover ~522 LEs on a tight device; the shared-bus
 		-- muxes then constant-fold back to the stock SD/EEPROM behaviour.
 		lisy_enable : boolean := true;
-		esp_sound   : boolean := false  -- true = ESP/GOSOWAV sound (drop GOSOF80+DFPlayer)
+		esp_sound   : boolean := false; -- true = ESP/GOSOWAV sound (drop GOSOF80+DFPlayer)
+		-- HYBRID build (requires esp_sound=false): GOSOF80 synthesises the supported sounds AND
+		-- the sound_link UART feeds the ESP, which plays only speech + complex-80B (sndmode=hybrid
+		-- on the ESP, per sndroute). Off by default => stock/esp_sound builds are unchanged.
+		hybrid      : boolean := false
 	);
 	port(
 	   -- the FPGA board
@@ -391,10 +395,10 @@ lisy_mosi <= MOSI;
 -- handshake to the ESP32 companion on the Debug pin: '1' = lisyctrl/diag mode is
 -- active => the shared SPI bus is released to the ESP (FPGA is now an SPI slave,
 -- 6502 held in reset, SD/EEPROM deselected). The ESP polls this before driving.
--- In the ESP-sound build, Debug is instead driven by the sound_link UART (it carries
--- the diag token + sound/game) -- see GEN_ESP_SND. So only drive the level here when
--- esp_sound is off (stock / PIN-2-sound builds).
-GEN_DBG_LVL: if not esp_sound generate
+-- In the ESP-sound build (and the hybrid build) Debug is instead driven by the sound_link
+-- UART (it carries the diag token + sound/game) -- see GEN_ESP_SND / GEN_HYB_LINK. So only
+-- drive the level here when neither ESP path is active (stock / PIN-2-sound builds).
+GEN_DBG_LVL: if (not esp_sound) and (not hybrid) generate
 Debug <= lisy_active;
 end generate GEN_DBG_LVL;
 CS_SDcard <= '1' when lisy_active = '1' else sd_cs_n;
@@ -1068,6 +1072,23 @@ Debug    <= sl_tx;
 Audio_RX <= '1';
 Sound    <= '0';
 end generate GEN_ESP_SND;
+
+-- HYBRID build: GOSOF80 stays the sound source (GEN_FPGA_SND drives Sound/PIN_7 + the unused
+-- DFP_tx/PIN_2), and the sound_link UART feeds the ESP on the Debug pin so it can play the
+-- speech + complex-80B that GOSOF80 can't. Only the Debug pin is driven here (the audio pins
+-- belong to GOSOF80). `and not esp_sound` guards against a both-true misconfig (no double Debug).
+GEN_HYB_LINK : if hybrid and not esp_sound generate
+SND_LINK_H : entity work.sound_link
+port map(
+	clk => clk_50, rst => not reset_l,
+	diag => lisy_active,
+	sound => Sound_S16 & Sound_S8 & Sound_S4 & Sound_S2 & Sound_S1,
+	game => game_select,
+	game_running => game_running,                     -- tournament auto-timer (0xF2/0xF3 to ESP)
+	tx => sl_tx
+);
+Debug <= sl_tx;
+end generate GEN_HYB_LINK;
  	
 	
 	
