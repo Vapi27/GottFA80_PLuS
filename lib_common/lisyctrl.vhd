@@ -17,6 +17,9 @@
 -- Register map (2-byte SPI frames, see spi_slave.vhd):
 --   R 0x00 ID(0x80)  R 0x01 VER(0x01)  R 0x02 STATUS{b0 active,b1 wd,b2 is80B}
 --   W 0x03 CTRL{b0 outputs_en, b1 lamp_blink}
+--   RW 0x04 CTRL2{b0 tournament_mode} (persists into gameplay)
+--   RW 0x05..0x07 TA_START (24-bit LMH, time-attack start points)  RW 0x08..0x0A TA_DECAY (24-bit LMH, pts/sec)
+--       0x04..0x0A persist past diag exit (not cleared on active=0) so the on-display countdown survives into the game
 --   R 0x10..0x17 SW_ROW[strobe] (bit=return, 1=closed)   R 0x18 DIP/slam
 --   W 0x20..0x25 LAMP[0..5] (48 bits)
 --   W 0x30 COIL (write coil# 1..9 -> pulse)   W 0x31 PULSE_MS
@@ -56,6 +59,8 @@ entity lisyctrl is
     o_sound      : out std_logic_vector(4 downto 0); -- System 80 sound code 0..31 -> gosof80
     o_sound_trig : out std_logic;                    -- level: high triggers a sound send
     o_tournament : out std_logic;                    -- CTRL2 (0x04) b0: tournament mode (persists into gameplay)
+    o_ta_start   : out std_logic_vector(23 downto 0); -- TA_START (0x05..0x07): time-attack start points (persists)
+    o_ta_decay   : out std_logic_vector(23 downto 0); -- TA_DECAY (0x08..0x0A): time-attack decay/sec (persists)
     i_DIP_Ret  : in  std_logic_vector(4 downto 0);
     i_slam     : in  std_logic;
     wd_tripped : out std_logic
@@ -81,6 +86,9 @@ architecture rtl of lisyctrl is
   -- register file
   signal ctrl     : std_logic_vector(7 downto 0) := x"00";  -- b0 outputs_en, b1 blink
   signal tourney_reg : std_logic_vector(7 downto 0) := x"00";  -- CTRL2 0x04 b0 tournament_mode (persists)
+  -- time-attack config (persists into gameplay, defaults = the tourney_countdown generics: 1,000,000 / 10,000)
+  signal ta_start_reg : std_logic_vector(23 downto 0) := x"0F4240";  -- TA_START 0x05..0x07 = 1,000,000
+  signal ta_decay_reg : std_logic_vector(23 downto 0) := x"002710";  -- TA_DECAY 0x08..0x0A = 10,000
   signal pulse_ms : std_logic_vector(7 downto 0) := x"3C";  -- default 60 ms
   signal lamp_b   : t_bytes(0 to 5) := (others => (others => '0'));
   signal seg_b    : t_bytes(0 to 2) := (others => (others => '0'));
@@ -175,6 +183,12 @@ begin
           case a is
             when 16#03# => ctrl     <= rx_byte;
             when 16#04# => tourney_reg <= rx_byte;     -- CTRL2: b0 tournament_mode (persists into gameplay)
+            when 16#05# => ta_start_reg( 7 downto  0) <= rx_byte;   -- TA_START low
+            when 16#06# => ta_start_reg(15 downto  8) <= rx_byte;   -- TA_START mid
+            when 16#07# => ta_start_reg(23 downto 16) <= rx_byte;   -- TA_START high
+            when 16#08# => ta_decay_reg( 7 downto  0) <= rx_byte;   -- TA_DECAY low
+            when 16#09# => ta_decay_reg(15 downto  8) <= rx_byte;   -- TA_DECAY mid
+            when 16#0A# => ta_decay_reg(23 downto 16) <= rx_byte;   -- TA_DECAY high
             when 16#31# => pulse_ms <= rx_byte;
             when 16#30# =>                            -- fire a coil (guarded)
               if to_integer(unsigned(rx_byte)) = 0 then
@@ -278,7 +292,8 @@ begin
   ----------------------------------------------------------------------------
   -- read-back mux
   ----------------------------------------------------------------------------
-  P_RD : process (cmd_addr, ctrl, active, wd_trip, sw_row, i_DIP_Ret, i_slam, pulse_ms, lamp_b, coil_fault)
+  P_RD : process (cmd_addr, ctrl, active, wd_trip, sw_row, i_DIP_Ret, i_slam, pulse_ms,
+                  lamp_b, coil_fault, tourney_reg, ta_start_reg, ta_decay_reg)
     variable a : integer;
   begin
     a := to_integer(cmd_addr);
@@ -288,6 +303,12 @@ begin
       when 16#02# => reg_rd <= "00000" & '0' & wd_trip & active;   -- b2 is80B (TODO)
       when 16#03# => reg_rd <= ctrl;
       when 16#04# => reg_rd <= tourney_reg;
+      when 16#05# => reg_rd <= ta_start_reg( 7 downto  0);
+      when 16#06# => reg_rd <= ta_start_reg(15 downto  8);
+      when 16#07# => reg_rd <= ta_start_reg(23 downto 16);
+      when 16#08# => reg_rd <= ta_decay_reg( 7 downto  0);
+      when 16#09# => reg_rd <= ta_decay_reg(15 downto  8);
+      when 16#0A# => reg_rd <= ta_decay_reg(23 downto 16);
       when 16#10# to 16#17# => reg_rd <= sw_row(a - 16#10#);
       when 16#18# => reg_rd <= "00" & i_slam & i_DIP_Ret;
       when 16#20# to 16#25# => reg_rd <= lamp_b(a - 16#20#);
@@ -314,6 +335,8 @@ begin
   o_sound      <= snd_code;
   o_sound_trig <= '1' when snd_hold > 0 else '0';
   o_tournament <= tourney_reg(0);                    -- persists past diag exit (not reset on active=0)
+  o_ta_start   <= ta_start_reg;                      -- time-attack start points (persists into gameplay)
+  o_ta_decay   <= ta_decay_reg;                      -- time-attack decay/sec (persists into gameplay)
 
   wd_tripped <= wd_trip;
 

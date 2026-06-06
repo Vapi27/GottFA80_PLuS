@@ -251,6 +251,8 @@ signal lisy_trig : std_logic;   -- long-press of the Gottlieb door test switch
 signal lisy_sound5     : std_logic_vector(4 downto 0);  -- lisyctrl sound code -> gosof80
 signal lisy_sound_trig : std_logic;                     -- lisyctrl sound trigger -> gosof80
 signal sl_tx           : std_logic;                     -- sound_link UART (ESP sound mode)
+signal ta_cfg_start    : std_logic_vector(23 downto 0); -- lisyctrl TA_START -> tourney countdown (0 => generic)
+signal ta_cfg_decay    : std_logic_vector(23 downto 0); -- lisyctrl TA_DECAY -> tourney countdown (0 => generic)
 
 
 begin
@@ -278,7 +280,9 @@ ta_rst <= not reset_l;
 TADISP: entity work.tourney_display_top
 	generic map ( WIDTH => 24, START_VAL => 1000000, DECAY => 10000, TICK_DIV => 50000000 )
 	port map ( clk => clk_50, rst => ta_rst, game_running => game_running,
-	           tournament_mode => tournament_mode, arm => ta_arm, dstr => ta_dstr,
+	           tournament_mode => tournament_mode,
+		           cfg_start => unsigned(ta_cfg_start), cfg_decay => unsigned(ta_cfg_decay),
+		           arm => ta_arm, dstr => ta_dstr,
 	           final_value => ta_value, dead => ta_dead );
 bm_disp1 <= ta_dstr when ta_arm = '1' else "    611";               -- countdown when armed, else SW version
 bm_show  <= '1' when (game_running = '0' or ta_arm = '1') else '0';  -- run at boot OR in a time-attack game
@@ -424,6 +428,7 @@ port map(
 	o_U6_PA => lisy_u6pa, o_U6_PB => lisy_u6pb, o_segments => open,
 	o_sound => lisy_sound5, o_sound_trig => lisy_sound_trig,
 	o_tournament => tournament_mode,                  -- arms time-attack display + tourney_block (Pstore)
+	o_ta_start => ta_cfg_start, o_ta_decay => ta_cfg_decay,  -- time-attack start/decay -> countdown (Pstore)
 	i_DIP_Ret => '0' & DIP_Return, i_slam => slam, wd_tripped => open
 );
 end generate GEN_LISY;
@@ -436,6 +441,8 @@ GEN_NOLISY: if not lisy_enable generate
 	lisy_u4pb   <= (others => '0');
 	lisy_u6pa   <= (others => '0');
 	lisy_u6pb   <= (others => '0');
+	ta_cfg_start <= (others => '0');   -- no lisyctrl -> 0 => tourney countdown uses its generic defaults
+	ta_cfg_decay <= (others => '0');
 end generate GEN_NOLISY;
 
 ---------------------

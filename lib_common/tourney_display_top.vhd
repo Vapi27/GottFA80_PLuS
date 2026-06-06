@@ -5,8 +5,10 @@
 --   -> value_to_dispstr (-> 7-char string). Feed `dstr` to a boot_message display input and,
 --   when `arm`='1', let boot_message's segments/strobes win the display mux during gameplay
 --   (today boot_message only runs when game_running='0'). `final_value` = the score at game
---   over (send on the link -> tourney::recordScore). START_VAL/DECAY are generics (the ESP
---   can drive them via a lisyctrl register feeding a wider build later).
+--   over (send on the link -> tourney::recordScore). START_VAL/DECAY are the compile-time
+--   defaults; the optional cfg_start/cfg_decay ports let the ESP drive them at run time from a
+--   lisyctrl register (0 on a cfg port = use the generic default), so the on-display countdown
+--   always matches the operator's chosen start/decay in the web UI.
 -- (C) 2026 Valere Pilpil / Pstore.  Part of GottFA80 (GPL-3.0).
 library ieee;
 use ieee.std_logic_1164.all;
@@ -24,6 +26,8 @@ entity tourney_display_top is
     rst             : in  std_logic;
     game_running    : in  std_logic;
     tournament_mode : in  std_logic;            -- time-attack armed
+    cfg_start       : in  unsigned(WIDTH-1 downto 0) := (others => '0');  -- run-time start (0 => generic)
+    cfg_decay       : in  unsigned(WIDTH-1 downto 0) := (others => '0');  -- run-time decay (0 => generic)
     arm             : out std_logic;            -- '1' => SYS80 shows our display (mux enable)
     dstr            : out string(1 to 7);       -- countdown as text -> boot_message display input
     final_value     : out unsigned(WIDTH-1 downto 0);
@@ -53,7 +57,8 @@ begin
 
   CD : entity work.tourney_countdown
     generic map ( WIDTH => WIDTH, START_VAL => START_VAL, DECAY => DECAY )
-    port map ( clk => clk, rst => rst, run => run, tick => tick, value => val, dead => dead );
+    port map ( clk => clk, rst => rst, run => run, tick => tick,
+               cfg_start => cfg_start, cfg_decay => cfg_decay, value => val, dead => dead );
 
   V2S : entity work.value_to_dispstr
     generic map ( IN_W => WIDTH )
