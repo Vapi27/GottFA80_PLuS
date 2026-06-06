@@ -55,6 +55,7 @@ entity lisyctrl is
     o_segments : out std_logic_vector(1 to 24);      -- display segments
     o_sound      : out std_logic_vector(4 downto 0); -- System 80 sound code 0..31 -> gosof80
     o_sound_trig : out std_logic;                    -- level: high triggers a sound send
+    o_tournament : out std_logic;                    -- CTRL2 (0x04) b0: tournament mode (persists into gameplay)
     i_DIP_Ret  : in  std_logic_vector(4 downto 0);
     i_slam     : in  std_logic;
     wd_tripped : out std_logic
@@ -79,6 +80,7 @@ architecture rtl of lisyctrl is
 
   -- register file
   signal ctrl     : std_logic_vector(7 downto 0) := x"00";  -- b0 outputs_en, b1 blink
+  signal tourney_reg : std_logic_vector(7 downto 0) := x"00";  -- CTRL2 0x04 b0 tournament_mode (persists)
   signal pulse_ms : std_logic_vector(7 downto 0) := x"3C";  -- default 60 ms
   signal lamp_b   : t_bytes(0 to 5) := (others => (others => '0'));
   signal seg_b    : t_bytes(0 to 2) := (others => (others => '0'));
@@ -172,6 +174,7 @@ begin
           a := to_integer(cmd_addr);
           case a is
             when 16#03# => ctrl     <= rx_byte;
+            when 16#04# => tourney_reg <= rx_byte;     -- CTRL2: b0 tournament_mode (persists into gameplay)
             when 16#31# => pulse_ms <= rx_byte;
             when 16#30# =>                            -- fire a coil (guarded)
               if to_integer(unsigned(rx_byte)) = 0 then
@@ -284,6 +287,7 @@ begin
       when 16#01# => reg_rd <= x"01";
       when 16#02# => reg_rd <= "00000" & '0' & wd_trip & active;   -- b2 is80B (TODO)
       when 16#03# => reg_rd <= ctrl;
+      when 16#04# => reg_rd <= tourney_reg;
       when 16#10# to 16#17# => reg_rd <= sw_row(a - 16#10#);
       when 16#18# => reg_rd <= "00" & i_slam & i_DIP_Ret;
       when 16#20# to 16#25# => reg_rd <= lamp_b(a - 16#20#);
@@ -309,6 +313,7 @@ begin
   -- sound: present the code + a level trigger (held sound_hold_ms) -> gosof80
   o_sound      <= snd_code;
   o_sound_trig <= '1' when snd_hold > 0 else '0';
+  o_tournament <= tourney_reg(0);                    -- persists past diag exit (not reset on active=0)
 
   wd_tripped <= wd_trip;
 

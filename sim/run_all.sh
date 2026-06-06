@@ -22,4 +22,24 @@ echo "== sound_link (FPGA->ESP UART: sound# + game#) =="
 ghdl -a lib_common/sound_link.vhd sim/tb_sound_link.vhd
 ghdl -e tb_sound_link
 ghdl -r tb_sound_link --stop-time=2ms
+echo "== tourney_block (tournament-mode solenoid suppressor) =="
+ghdl -a lib_common/tourney_block.vhd sim/tb_tourney_block.vhd
+ghdl -e tb_tourney_block
+ghdl -r tb_tourney_block --stop-time=1us
+echo "== tourney_countdown (time-attack score timer) =="
+ghdl -a lib_common/tourney_countdown.vhd sim/tb_tourney_countdown.vhd
+ghdl -e tb_tourney_countdown
+ghdl -r tb_tourney_countdown --stop-time=10us
+echo "== bin_to_bcd (binary -> BCD for the display) =="
+ghdl -a lib_common/bin_to_bcd.vhd sim/tb_bin_to_bcd.vhd
+ghdl -e tb_bin_to_bcd
+ghdl -r tb_bin_to_bcd --stop-time=1us
+echo "== value_to_dispstr (countdown value -> 7-char display string) =="
+ghdl -a lib_common/value_to_dispstr.vhd sim/tb_value_to_dispstr.vhd
+ghdl -e tb_value_to_dispstr
+ghdl -r tb_value_to_dispstr --stop-time=1us
+echo "== tourney_display_top (full time-attack display subsystem) =="
+ghdl -a lib_common/tourney_countdown.vhd lib_common/tourney_display_top.vhd sim/tb_tourney_display_top.vhd
+ghdl -e tb_tourney_display_top
+ghdl -r tb_tourney_display_top --stop-time=20us
 echo "== ALL SIMS DONE =="

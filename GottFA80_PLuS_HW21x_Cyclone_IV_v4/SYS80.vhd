@@ -400,6 +400,7 @@ port map(
 	o_U5_PA => open, o_U5_PB7 => open,
 	o_U6_PA => lisy_u6pa, o_U6_PB => lisy_u6pb, o_segments => open,
 	o_sound => lisy_sound5, o_sound_trig => lisy_sound_trig,
+	o_tournament => open,                            -- (Cyclone IV variant: tournament integration TODO)
 	i_DIP_Ret => '0' & DIP_Return, i_slam => slam, wd_tripped => open
 );
 end generate GEN_LISY;

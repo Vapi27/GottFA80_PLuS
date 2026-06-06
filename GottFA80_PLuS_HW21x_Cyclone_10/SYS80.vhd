@@ -142,8 +142,17 @@ signal bm_segments 		: std_logic_vector(1 to 24);
 signal Din_Seg_A			: std_logic_vector(3 downto 0);	
 signal Din_Seg_B			: std_logic_vector(3 downto 0);	
 signal Din_Seg_C			: std_logic_vector(3 downto 0);	
-signal bm_digit_strobe	: std_logic_vector(3 downto 0);	
-			
+signal bm_digit_strobe	: std_logic_vector(3 downto 0);
+-- Tournament time-attack display injection (Pstore) -- OFF until tournament_mode='1' (no change)
+signal tournament_mode	: std_logic := '0';   -- TODO: drive from lisyctrl/DIP; '0' = stock behaviour
+signal ta_arm			: std_logic;
+signal ta_dstr			: string(1 to 7);
+signal ta_value			: unsigned(23 downto 0);
+signal ta_dead			: std_logic;
+signal bm_disp1			: string(1 to 7);
+signal bm_show			: std_logic;
+signal u6pa_masked		: std_logic_vector(7 downto 0);
+
 -- RIOT U& Solenoid & Lamp Control
 signal U6_RAM_cs  		: std_logic;
 signal U6_IO_cs  			: std_logic;
@@ -263,17 +272,26 @@ opt_slam_fix_close		<= not game_option(4);
 ----------------------
 -- boot message
 ----------------------
+-- Tournament time-attack: countdown subsystem -> shows on display1 during a time-attack game (Pstore)
+TADISP: entity work.tourney_display_top
+	generic map ( WIDTH => 24, START_VAL => 1000000, DECAY => 10000, TICK_DIV => 50000000 )
+	port map ( clk => clk_50, rst => not reset_l, game_running => game_running,
+	           tournament_mode => tournament_mode, arm => ta_arm, dstr => ta_dstr,
+	           final_value => ta_value, dead => ta_dead );
+bm_disp1 <= ta_dstr when ta_arm = '1' else "    611";               -- countdown when armed, else SW version
+bm_show  <= '1' when (game_running = '0' or ta_arm = '1') else '0';  -- run at boot OR in a time-attack game
+
 BM: entity work.boot_message
 port map(
-	clk_in		=> cpu_clk, 	
+	clk_in		=> cpu_clk,
 	-- Control/Data Signals,
-   show  => not game_running,
+   show  => bm_show,
 	SD_error => not SDcard_error,
 	-- output
 	bm_digit_strobe	=> bm_digit_strobe,
 	bm_segments => bm_segments,
-	-- input (display data)		
-	display1	=> "    611",  -- SW VERSION TO BE PUT HERE
+	-- input (display data)
+	display1	=> bm_disp1,  -- time-attack countdown (when armed) or SW VERSION
 	display2	=> "    " & game_dig2 & game_dig1 & game_dig0,	
 	display3	=> " 050963",
 	display4	=> " " & g_opt_dig1 & g_opt_dig0 & "  " & sb_opt_dig1 & sb_opt_dig0,
@@ -377,6 +395,10 @@ CS_SDcard <= '1' when lisy_active = '1' else sd_cs_n;
 CS_EEprom <= '1' when lisy_active = '1' else ee_cs_n;
 cpu_res_n <= '0' when lisy_active = '1' else reset_l;
 u6pa_src  <= lisy_u6pa when lisy_active = '1' else U6_pa_out;
+-- Tournament: neutralise a free-game solenoid (knocker) when armed. Placeholder code = no block. -- Pstore
+TBLOCK: entity work.tourney_block
+	generic map ( SEL_HI => 3, SEL_LO => 0, BLOCK_CODE => "1111", NOOP_CODE => "1111" )
+	port map ( port_in => u6pa_src, sol_active => '1', tournament_mode => tournament_mode, port_out => u6pa_masked );
 u6pb_src  <= lisy_u6pb when lisy_active = '1' else U6_pb_out;
 U4_PB     <= lisy_u4pb when lisy_active = '1' else u4_pb_cpu;
 -- mode entry: a LONG-PRESS of the Gottlieb door test switch enters diag mode;
@@ -399,6 +421,7 @@ port map(
 	o_U5_PA => open, o_U5_PB7 => open,
 	o_U6_PA => lisy_u6pa, o_U6_PB => lisy_u6pb, o_segments => open,
 	o_sound => lisy_sound5, o_sound_trig => lisy_sound_trig,
+	o_tournament => tournament_mode,                  -- arms time-attack display + tourney_block (Pstore)
 	i_DIP_Ret => '0' & DIP_Return, i_slam => slam, wd_tripped => open
 );
 end generate GEN_LISY;
@@ -672,16 +695,16 @@ port map(
 -- 80/80A display routines	
 --------------------------------------------------
 --digit strobes
-U5_PA(3 downto 0) <= U5_pa_out(3 downto 0) when game_running='1' else bm_digit_strobe;
+U5_PA(3 downto 0) <= U5_pa_out(3 downto 0) when (game_running='1' and ta_arm='0') else bm_digit_strobe;  -- time-attack overlays the strobes
 
 -- assign display segments dependent on display type		
 disp_segments <= 
 --	segments_80B when not80B = '0' else	
 --	bm_segments when game_running = '0' else --and U5_pb_out(6) = '1' else  --RTH
 --	segments_80;
-	bm_segments when ( game_running = '0' and U5_pb_out(6) = '1') or SDcard_error = '0' else  --RTH
+	bm_segments when ( ta_arm = '1' ) or ( game_running = '0' and U5_pb_out(6) = '1') or SDcard_error = '0' else  --RTH (ta_arm = time-attack overlay)
 	segments_80 when not80B = '1' else
-   segments_80B;	
+   segments_80B;
 
 	
 --segments
@@ -739,8 +762,8 @@ segments_80(24) <= not U5_pb_out(6);
 --------------------------------------------------
 -- solenoids & lamps
 --------------------------------------------------
-U6_PA(4 downto 0) <= not u6pa_src(4 downto 0) when (game_running='1' or lisy_active='1') else "00000"; --sound AND Z31
-U6_PA(7 downto 5) <= u6pa_src(7 downto 5) when (game_running='1' or lisy_active='1') else "111"; -- decoder enable and Sol9
+U6_PA(4 downto 0) <= not u6pa_masked(4 downto 0) when (game_running='1' or lisy_active='1') else "00000"; --sound AND Z31 (via tourney_block)
+U6_PA(7 downto 5) <= u6pa_masked(7 downto 5) when (game_running='1' or lisy_active='1') else "111"; -- decoder enable and Sol9
 U6_PB(3 downto 0) <= not u6pb_src(3 downto 0) when (game_running='1' or lisy_active='1') else "1111"; -- thunk prevention (inverter)
 U6_PB(7 downto 4) <= u6pb_src(7 downto 4) when (reset_l='1' or lisy_active='1') else lamp_ds; -- thunk prevention 
 	
