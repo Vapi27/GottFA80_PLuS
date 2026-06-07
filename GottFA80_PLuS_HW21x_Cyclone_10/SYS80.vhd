@@ -74,7 +74,7 @@ entity SYS80 is
 		myTest		: 	in 	std_logic;
 		
 		-- Sound
-		Audio_RX			: 	buffer 	std_logic;
+		Audio_RX			: 	inout 	std_logic;  -- DFPlayer TX (stock) OR ESP->FPGA display UART in (hybrid/esp_sound)
 		Sound 			: 	buffer 	std_logic;
 
 		-- debug
@@ -257,6 +257,7 @@ signal lisy_sound_trig : std_logic;                     -- lisyctrl sound trigge
 signal sl_tx           : std_logic;                     -- sound_link UART (ESP sound mode)
 signal ta_cfg_start    : std_logic_vector(23 downto 0); -- lisyctrl TA_START -> tourney countdown (0 => generic)
 signal ta_cfg_decay    : std_logic_vector(23 downto 0); -- lisyctrl TA_DECAY -> tourney countdown (0 => generic)
+signal dfp_tx_sig      : std_logic;                     -- GOSOF80 DFPlayer TX (-> Audio_RX only in a stock build)
 
 
 begin
@@ -281,13 +282,19 @@ opt_slam_fix_close		<= not game_option(4);
 ----------------------
 -- Tournament time-attack: countdown subsystem -> shows on display1 during a time-attack game (Pstore)
 ta_rst <= not reset_l;
-TADISP: entity work.tourney_display_top
-	generic map ( WIDTH => 24, START_VAL => 1000000, DECAY => 10000, TICK_DIV => 50000000 )
-	port map ( clk => clk_50, rst => ta_rst, game_running => game_running,
-	           tournament_mode => tournament_mode,
-		           cfg_start => unsigned(ta_cfg_start), cfg_decay => unsigned(ta_cfg_decay),
-		           arm => ta_arm, dstr => ta_dstr,
-	           final_value => ta_value, dead => ta_dead );
+-- Tournament display = OPTION B: the ESP computes + formats the countdown and streams the 7 chars
+-- over Audio_RX (PIN_2); disp_inject shows them on the machine display. Replaces the FPGA-autonomous
+-- tourney_display_top chain (frees ~463 LE; the ESP now does the math + the 7-seg/16-seg formatting).
+-- Only when an ESP is present (hybrid or esp_sound); a stock build has no companion -> no overlay.
+GEN_DISPINJ : if esp_sound or hybrid generate
+DISPINJ : entity work.disp_inject
+	generic map ( CLK_HZ => 50000000, BAUD => 115200, TIMEOUT_MS => 500 )
+	port map ( clk => clk_50, rst => ta_rst, rx => Audio_RX, arm => ta_arm, dstr => ta_dstr );
+end generate GEN_DISPINJ;
+GEN_NODISP : if (not esp_sound) and (not hybrid) generate
+	ta_arm  <= '0';
+	ta_dstr <= "    611";
+end generate GEN_NODISP;
 bm_disp1 <= ta_dstr when ta_arm = '1' else "    611";               -- countdown when armed, else SW version
 bm_show  <= '1' when (game_running = '0' or ta_arm = '1') else '0';  -- run at boot OR in a time-attack game
 
@@ -1043,7 +1050,7 @@ port map(
 		--option   => sb_option,
 		
 		-- DFPlayer
-		DFP_tx	=> Audio_RX,
+		DFP_tx	=> dfp_tx_sig,   -- routed to Audio_RX only in a stock build (see GEN_DFP_DRV)
 		
 		--module
 		soundrom1_addr => soundrom1_addr,
@@ -1069,9 +1076,13 @@ port map(
 	tx => sl_tx
 );
 Debug    <= sl_tx;
-Audio_RX <= '1';
 Sound    <= '0';
 end generate GEN_ESP_SND;
+
+-- Audio_RX/PIN_2 direction: DFPlayer TX in a stock build; an INPUT (ESP -> disp_inject) whenever an
+-- ESP is present (hybrid or esp_sound). Exactly one driver per build mode (no conflict).
+GEN_DFP_DRV : if (not esp_sound) and (not hybrid) generate Audio_RX <= dfp_tx_sig; end generate GEN_DFP_DRV;
+GEN_RX_IN   : if esp_sound or hybrid           generate Audio_RX <= 'Z';        end generate GEN_RX_IN;
 
 -- HYBRID build: GOSOF80 stays the sound source (GEN_FPGA_SND drives Sound/PIN_7 + the unused
 -- DFP_tx/PIN_2), and the sound_link UART feeds the ESP on the Debug pin so it can play the
