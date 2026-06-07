@@ -42,4 +42,8 @@ echo "== tourney_display_top (full time-attack display subsystem) =="
 ghdl -a lib_common/tourney_countdown.vhd lib_common/tourney_display_top.vhd sim/tb_tourney_display_top.vhd
 ghdl -e tb_tourney_display_top
 ghdl -r tb_tourney_display_top --stop-time=20us
+echo "== disp_inject (ESP->FPGA display UART, option B) =="
+ghdl -a lib_common/disp_inject.vhd sim/tb_disp_inject.vhd
+ghdl -e tb_disp_inject
+ghdl -r tb_disp_inject --stop-time=100us
 echo "== ALL SIMS DONE =="
