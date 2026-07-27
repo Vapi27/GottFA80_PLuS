@@ -14,4 +14,8 @@ echo "== integration (inout bus sharing) =="
 ghdl -a lib_common/spi_slave.vhd lib_common/lisyctrl.vhd sim/sys80_glue.vhd sim/tb_integration.vhd
 ghdl -e tb_integration
 ghdl -r tb_integration --stop-time=20ms
+echo "== ta_overlay (time-attack display injection strobe map) =="
+ghdl -a lib_common/SN7448_GTB.vhd lib_common/ta_overlay.vhd sim/tb_ta_overlay.vhd
+ghdl -e tb_ta_overlay
+ghdl -r tb_ta_overlay --stop-time=1ms
 echo "== ALL SIMS DONE =="

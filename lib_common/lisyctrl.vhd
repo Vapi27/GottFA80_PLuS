@@ -17,10 +17,15 @@
 -- Register map (2-byte SPI frames, see spi_slave.vhd):
 --   R 0x00 ID(0x80)  R 0x01 VER(0x01)  R 0x02 STATUS{b0 active,b1 wd,b2 is80B}
 --   W 0x03 CTRL{b0 outputs_en, b1 lamp_blink}
+--   RW 0x04 CTRL2{b0 tournament_mode} (persists into gameplay)
+--   RW 0x05..0x07 TA_START (24-bit LMH, time-attack start points)  RW 0x08..0x0A TA_DECAY (24-bit LMH, pts/sec)
+--       0x04..0x0A persist past diag exit (not cleared on active=0) so the on-display countdown survives into the game
 --   R 0x10..0x17 SW_ROW[strobe] (bit=return, 1=closed)   R 0x18 DIP/slam
 --   W 0x20..0x25 LAMP[0..5] (48 bits)
 --   W 0x30 COIL (write coil# 1..9 -> pulse)   W 0x31 PULSE_MS
+--   R 0x32 COIL_FAULT {b0 pulse-clamped,b1 refire-blocked,b2 wd-with-coil; b7..4 coil#}; W clears
 --   W 0x40..0x42 SEG_A/B/C (display segments)  W 0x43 U5 {b3..0 strobes, b7 sw_enable}
+--   W 0x44 SOUND (write System 80 sound code 0..31 -> play via gosof80)
 
 library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
@@ -31,7 +36,10 @@ entity lisyctrl is
     clk_hz        : integer := 50000000;
     wd_timeout_ms : integer := 120;        -- coil/output comms watchdog
     gap_clocks    : integer := 64;         -- SPI frame gap (passed to spi_slave)
-    scan_div      : integer := 5000        -- clk cycles per switch strobe (~100us)
+    scan_div      : integer := 5000;       -- clk cycles per switch strobe (~100us)
+    max_pulse_ms  : integer := 150;        -- hard ceiling on a coil pulse (thermal guard)
+    refire_ms     : integer := 40;         -- min off-time between coil fires (anti machine-gun)
+    sound_hold_ms : integer := 60          -- ms to hold the sound trigger high (level send)
   );
   port (
     clk        : in  std_logic;
@@ -48,6 +56,12 @@ entity lisyctrl is
     o_U6_PA    : out std_logic_vector(7 downto 0);   -- solenoids + sound
     o_U6_PB    : out std_logic_vector(7 downto 0);   -- lamps (4 data + 4 strobe)
     o_segments : out std_logic_vector(1 to 24);      -- display segments
+    o_txt      : out std_logic_vector(319 downto 0); -- diag display text: 2 rows x 20 ASCII chars (W 0x50..0x77)
+    o_sound      : out std_logic_vector(4 downto 0); -- System 80 sound code 0..31 -> gosof80
+    o_sound_trig : out std_logic;                    -- level: high triggers a sound send
+    o_tournament : out std_logic;                    -- CTRL2 (0x04) b0: tournament mode (persists into gameplay)
+    o_ta_start   : out std_logic_vector(23 downto 0); -- TA_START (0x05..0x07): time-attack start points (persists)
+    o_ta_decay   : out std_logic_vector(23 downto 0); -- TA_DECAY (0x08..0x0A): time-attack decay/sec (persists)
     i_DIP_Ret  : in  std_logic_vector(4 downto 0);
     i_slam     : in  std_logic;
     wd_tripped : out std_logic
@@ -72,10 +86,17 @@ architecture rtl of lisyctrl is
 
   -- register file
   signal ctrl     : std_logic_vector(7 downto 0) := x"00";  -- b0 outputs_en, b1 blink
+  signal tourney_reg : std_logic_vector(7 downto 0) := x"00";  -- CTRL2 0x04 b0 tournament_mode (persists)
+  -- time-attack config (persists into gameplay, defaults = the tourney_countdown generics: 1,000,000 / 10,000)
+  signal ta_start_reg : std_logic_vector(23 downto 0) := x"0F4240";  -- TA_START 0x05..0x07 = 1,000,000
+  signal ta_decay_reg : std_logic_vector(23 downto 0) := x"002710";  -- TA_DECAY 0x08..0x0A = 10,000
   signal pulse_ms : std_logic_vector(7 downto 0) := x"3C";  -- default 60 ms
   signal lamp_b   : t_bytes(0 to 5) := (others => (others => '0'));
   signal seg_b    : t_bytes(0 to 2) := (others => (others => '0'));
+  signal txt_b    : t_bytes(0 to 39) := (others => x"20");  -- 2x20 ASCII diag text (spaces)
   signal u5_reg   : std_logic_vector(7 downto 0) := x"00";
+  signal dig_scan : unsigned(3 downto 0) := (others => '0');   -- display digit auto-scan
+  signal dig_div  : integer range 0 to 49999 := 0;
   signal sw_row   : t_bytes(0 to 7) := (others => (others => '0'));
 
   alias  outputs_en : std_logic is ctrl(0);
@@ -86,9 +107,15 @@ architecture rtl of lisyctrl is
   constant WD_MAX : integer := wd_timeout_ms;          -- counted in ms ticks
   signal ms_div   : integer range 0 to MS_MAX := MS_MAX;
 
-  -- coil pulse
+  -- coil pulse + protection
   signal coil_n     : integer range 0 to 15 := 0;
   signal pulse_left : integer range 0 to 255 := 0;
+  signal refire_cnt : integer range 0 to refire_ms := 0;      -- cooldown after a pulse
+  signal coil_fault : std_logic_vector(7 downto 0) := x"00";  -- b0 clamp,b1 refire,b2 wd; b7..4 coil#
+
+  -- sound (System 80 5-bit code -> gosof80, level-triggered)
+  signal snd_code   : std_logic_vector(4 downto 0) := "00000";
+  signal snd_hold   : integer range 0 to sound_hold_ms := 0;  -- ms left holding the trigger high
 
   -- watchdog
   signal wd_cnt  : integer range 0 to 65535 := WD_MAX;
@@ -100,7 +127,7 @@ architecture rtl of lisyctrl is
 
   -- lamp refresh
   signal lamp_grp  : integer range 0 to 11 := 0;
-  signal lamp_cnt  : integer range 0 to 1023 := 0;
+  signal lamp_cnt  : integer range 0 to 131071 := 0;
   signal blink_div : integer range 0 to clk_hz := 0;
   signal blink_ph  : std_logic := '1';
 
@@ -109,10 +136,10 @@ architecture rtl of lisyctrl is
   -- Correct by construction: it mimics the ROM, and the top reuses the same path.
   function f_coil(n : integer) return std_logic_vector is
   begin
-    if    n >= 1 and n <= 4 then return std_logic_vector(to_unsigned(16#20# + (n-1),    8));
-    elsif n >= 5 and n <= 8 then return std_logic_vector(to_unsigned(16#40# + (n-5)*4,  8));
-    elsif n = 9             then return x"80";
-    else                         return x"00";
+    if    n >= 1 and n <= 4 then return std_logic_vector(not to_unsigned(16#20# + (n-1),    8));
+    elsif n >= 5 and n <= 8 then return std_logic_vector(not to_unsigned(16#40# + (n-5)*4,  8));
+    elsif n = 9             then return x"7F";
+    else                         return x"FF";
     end if;
   end function;
 
@@ -142,6 +169,7 @@ begin
     if active = '0' then
       cmd_seen <= '0'; coil_n <= 0; pulse_left <= 0;
       wd_cnt <= WD_MAX; wd_trip <= '0';
+      refire_cnt <= 0; snd_hold <= 0; coil_fault <= x"00";
     else
       -- 1 ms time base
       if ms_div = 0 then ms_div <= MS_MAX; ms_now := true;
@@ -158,27 +186,54 @@ begin
           a := to_integer(cmd_addr);
           case a is
             when 16#03# => ctrl     <= rx_byte;
+            when 16#04# => tourney_reg <= rx_byte;     -- CTRL2: b0 tournament_mode (persists into gameplay)
+            when 16#05# => ta_start_reg( 7 downto  0) <= rx_byte;   -- TA_START low
+            when 16#06# => ta_start_reg(15 downto  8) <= rx_byte;   -- TA_START mid
+            when 16#07# => ta_start_reg(23 downto 16) <= rx_byte;   -- TA_START high
+            when 16#08# => ta_decay_reg( 7 downto  0) <= rx_byte;   -- TA_DECAY low
+            when 16#09# => ta_decay_reg(15 downto  8) <= rx_byte;   -- TA_DECAY mid
+            when 16#0A# => ta_decay_reg(23 downto 16) <= rx_byte;   -- TA_DECAY high
             when 16#31# => pulse_ms <= rx_byte;
-            when 16#30# =>                            -- fire a coil
-              coil_n     <= to_integer(unsigned(rx_byte));
-              pulse_left <= to_integer(unsigned(pulse_ms));
+            when 16#30# =>                            -- fire a coil (guarded)
+              if to_integer(unsigned(rx_byte)) = 0 then
+                coil_n <= 0; pulse_left <= 0;          -- explicit off
+              elsif refire_cnt /= 0 then
+                coil_fault <= rx_byte(3 downto 0) & "0010";   -- b1: re-fire blocked (cooldown)
+              else
+                coil_n <= to_integer(unsigned(rx_byte));
+                if to_integer(unsigned(pulse_ms)) > max_pulse_ms then
+                  pulse_left <= max_pulse_ms;
+                  coil_fault <= rx_byte(3 downto 0) & "0001";  -- b0: pulse clamped to max
+                else
+                  pulse_left <= to_integer(unsigned(pulse_ms));
+                end if;
+              end if;
+            when 16#32# => coil_fault <= x"00";        -- write clears coil-fault flags
+            when 16#44# => snd_code <= rx_byte(4 downto 0); snd_hold <= sound_hold_ms;  -- play sound
             when 16#20# to 16#25# => lamp_b(a - 16#20#) <= rx_byte;
             when 16#40# to 16#42# => seg_b (a - 16#40#) <= rx_byte;
             when 16#43# => u5_reg <= rx_byte;
+            when 16#50# to 16#77# => txt_b(a - 16#50#) <= rx_byte;  -- diag display text
             when others => null;
           end case;
         end if;
       end if;
 
-      -- coil pulse timer + watchdog (per ms)
+      -- coil pulse timer + cooldown + sound-hold + watchdog (per ms)
       if ms_now then
+        if refire_cnt > 0 then refire_cnt <= refire_cnt - 1; end if;
+        if snd_hold   > 0 then snd_hold   <= snd_hold   - 1; end if;
         if pulse_left > 0 then
           pulse_left <= pulse_left - 1;
-          if pulse_left = 1 then coil_n <= 0; end if;
+          if pulse_left = 1 then coil_n <= 0; refire_cnt <= refire_ms; end if;  -- arm cooldown
         end if;
         if outputs_en = '1' then
           if wd_cnt > 0 then wd_cnt <= wd_cnt - 1;
-          else wd_trip <= '1'; coil_n <= 0; pulse_left <= 0; end if;
+          else
+            wd_trip <= '1';
+            if coil_n /= 0 then coil_fault <= std_logic_vector(to_unsigned(coil_n, 4)) & "0100"; end if;
+            coil_n <= 0; pulse_left <= 0;
+          end if;
         end if;
       end if;
     end if;
@@ -226,11 +281,10 @@ begin
       if outputs_en = '0' or (lamp_blink = '1' and blink_ph = '0') then nib := "0000"; end if;
       -- drive: data nibble + group address + strobe enable (pulsed via lamp_cnt)
       o_U6_PB(3 downto 0) <= nib;
-      o_U6_PB(6 downto 4) <= std_logic_vector(to_unsigned(lamp_grp mod 8, 3));
-      if lamp_cnt < 4 then o_U6_PB(7) <= '1'; else o_U6_PB(7) <= '0'; end if;
+      o_U6_PB(7 downto 4) <= std_logic_vector(to_unsigned(lamp_grp + 1, 4));  -- gts80.c: HIGH nibble = column 1..12
       if lamp_cnt = 0 then
         if lamp_grp = 11 then lamp_grp <= 0; else lamp_grp <= lamp_grp + 1; end if;
-        lamp_cnt <= 16;
+        lamp_cnt <= 99999;  -- 2 ms/column @50 MHz: S80 lamp latches + RC filters need ms-scale (340 ns scanned = noise)
       else
         lamp_cnt <= lamp_cnt - 1;
       end if;
@@ -242,7 +296,8 @@ begin
   ----------------------------------------------------------------------------
   -- read-back mux
   ----------------------------------------------------------------------------
-  P_RD : process (cmd_addr, ctrl, active, wd_trip, sw_row, i_DIP_Ret, i_slam, pulse_ms, lamp_b)
+  P_RD : process (cmd_addr, ctrl, active, wd_trip, sw_row, i_DIP_Ret, i_slam, pulse_ms,
+                  lamp_b, coil_fault, tourney_reg, ta_start_reg, ta_decay_reg)
     variable a : integer;
   begin
     a := to_integer(cmd_addr);
@@ -251,26 +306,52 @@ begin
       when 16#01# => reg_rd <= x"01";
       when 16#02# => reg_rd <= "00000" & '0' & wd_trip & active;   -- b2 is80B (TODO)
       when 16#03# => reg_rd <= ctrl;
+      when 16#04# => reg_rd <= tourney_reg;
+      when 16#05# => reg_rd <= ta_start_reg( 7 downto  0);
+      when 16#06# => reg_rd <= ta_start_reg(15 downto  8);
+      when 16#07# => reg_rd <= ta_start_reg(23 downto 16);
+      when 16#08# => reg_rd <= ta_decay_reg( 7 downto  0);
+      when 16#09# => reg_rd <= ta_decay_reg(15 downto  8);
+      when 16#0A# => reg_rd <= ta_decay_reg(23 downto 16);
       when 16#10# to 16#17# => reg_rd <= sw_row(a - 16#10#);
       when 16#18# => reg_rd <= "00" & i_slam & i_DIP_Ret;
       when 16#20# to 16#25# => reg_rd <= lamp_b(a - 16#20#);
       when 16#31# => reg_rd <= pulse_ms;
+      when 16#32# => reg_rd <= coil_fault;
       when others => reg_rd <= x"00";
     end case;
   end process;
 
   ----------------------------------------------------------------------------
-  -- solenoid output (gts80 data) — gated + watchdog; 0x00 = SAFE (enables off)
+  -- solenoid output (gts80 data) — gated + watchdog; 0xFF=SAFE off: HW active-low, SYS80:785 inverts low nibble -> 0xE0 pins. 0x00 fires ALL coils
   ----------------------------------------------------------------------------
   o_U6_PA <= f_coil(coil_n) when (outputs_en = '1' and wd_trip = '0' and coil_n /= 0)
-             else x"00";
+             else not ("000" & '1' & snd_code(3 downto 0)) when (outputs_en = '1' and snd_hold > 0)  -- 80B sound board: ~(0x10|cmd)
+             else x"FF";
 
   -- display + U5 passthrough
+  GEN_TXT: for i in 0 to 39 generate
+    o_txt(8*i+7 downto 8*i) <= txt_b(i);
+  end generate GEN_TXT;
   o_segments(1 to 8)   <= seg_b(0);
   o_segments(9 to 16)  <= seg_b(1);
   o_segments(17 to 24) <= seg_b(2);
-  o_U5_PA   <= u5_reg(3 downto 0);
+  -- auto-scan the 16 digit strobes (~1 ms each, the boot-message model) so a
+  -- static SEG_A/B/C pattern shows on every digit; u5_reg(6)='1' = manual hold.
+  P_DIGSCAN : process begin
+    wait until rising_edge(clk);
+    if dig_div = 0 then dig_div <= 49999; dig_scan <= dig_scan + 1;
+    else dig_div <= dig_div - 1; end if;
+  end process;
+  o_U5_PA   <= u5_reg(3 downto 0) when u5_reg(6) = '1' else std_logic_vector(dig_scan);
   o_U5_PB7  <= u5_reg(7);
+
+  -- sound: present the code + a level trigger (held sound_hold_ms) -> gosof80
+  o_sound      <= snd_code;
+  o_sound_trig <= '1' when snd_hold > 0 else '0';
+  o_tournament <= tourney_reg(0);                    -- persists past diag exit (not reset on active=0)
+  o_ta_start   <= ta_start_reg;                      -- time-attack start points (persists into gameplay)
+  o_ta_decay   <= ta_decay_reg;                      -- time-attack decay/sec (persists into gameplay)
 
   wd_tripped <= wd_trip;
 

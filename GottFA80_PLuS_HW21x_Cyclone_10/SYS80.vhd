@@ -26,6 +26,20 @@ use ieee.std_logic_1164.all;
 use IEEE.numeric_std.all;
 
 entity SYS80 is
+	generic(
+		-- compile-time include the lisyctrl diagnostic bridge (default on).
+		-- set false to recover ~522 LEs on a tight device; the shared-bus
+		-- muxes then constant-fold back to the stock SD/EEPROM behaviour.
+		lisy_enable : boolean := true;
+		esp_sound   : boolean := true;  -- true = ESP/GOSOWAV sound (drop GOSOF80+DFPlayer)
+		-- NOSND build 2026-07-09: this 80B machine has its REAL sound board (diag
+		-- test drives it via the U6_PA strobe); GOSOF80 (1709 LE + 1 M9K) freed
+		-- -> headroom for the AY integration. sound_link/heartbeat kept (GEN_ESP_SND).
+		-- HYBRID build (requires esp_sound=false): GOSOF80 synthesises the supported sounds AND
+		-- the sound_link UART feeds the ESP, which plays only speech + complex-80B (sndmode=hybrid
+		-- on the ESP, per sndroute). Off by default => stock/esp_sound builds are unchanged.
+		hybrid      : boolean := false
+	);
 	port(
 	   -- the FPGA board
 		clk_50	: in std_logic;
@@ -63,7 +77,7 @@ entity SYS80 is
 		myTest		: 	in 	std_logic;
 		
 		-- Sound
-		Audio_RX			: 	buffer 	std_logic;
+		Audio_RX			: 	in 	std_logic;   -- ESP -> FPGA display-inject UART RX (PIN_2)
 		Sound 			: 	buffer 	std_logic;
 
 		-- debug
@@ -135,8 +149,31 @@ signal bm_segments 		: std_logic_vector(1 to 24);
 signal Din_Seg_A			: std_logic_vector(3 downto 0);	
 signal Din_Seg_B			: std_logic_vector(3 downto 0);	
 signal Din_Seg_C			: std_logic_vector(3 downto 0);	
-signal bm_digit_strobe	: std_logic_vector(3 downto 0);	
-			
+signal bm_digit_strobe	: std_logic_vector(3 downto 0);
+-- Tournament time-attack display injection (Pstore) -- OFF until tournament_mode='1' (no change)
+signal tournament_mode	: std_logic := '0';   -- TODO: drive from lisyctrl/DIP; '0' = stock behaviour
+signal ta_arm			: std_logic;
+signal ta_dstr			: string(1 to 7);
+signal ta_value			: unsigned(23 downto 0);
+signal ta_dead			: std_logic;
+signal bm_disp1			: string(1 to 7);
+signal bm_show			: std_logic;
+signal ta_rst			: std_logic;            -- = not reset_l (active-high reset for tourney_display_top)
+signal u6pa_masked		: std_logic_vector(7 downto 0);
+-- ---------------------------------------------------------------------------
+-- TIME-ATTACK OVERLAY v3 (2026-07-27): paint the countdown on an UNUSED display
+-- instead of taking the whole glass.  See the "TIME-ATTACK DISPLAY INJECTION"
+-- block further down for the strobe-map proof and the ctrl-bit table.
+-- ---------------------------------------------------------------------------
+signal ta_sel			: std_logic_vector(2 downto 0); -- which display to paint (dinj_ctrl(6 downto 4))
+signal ta_full			: std_logic;            -- '1' = legacy behaviour: overlay owns the WHOLE glass
+signal ta_part			: std_logic;            -- '1' = paint ONE display, ROM keeps the rest
+signal ta_hit_a			: std_logic;            -- '1' = replace segment group A for the current strobe
+signal ta_hit_b			: std_logic;            -- '1' = replace segment group B
+signal ta_hit_c			: std_logic;            -- '1' = replace segment group C
+signal ta_seg			: std_logic_vector(1 to 8);     -- the pattern to put there
+signal segments_inj		: std_logic_vector(1 to 24);    -- segments_80 with the countdown merged in
+
 -- RIOT U& Solenoid & Lamp Control
 signal U6_RAM_cs  		: std_logic;
 signal U6_IO_cs  			: std_logic;
@@ -226,19 +263,210 @@ signal wr_soundrom2		: std_logic;
 
 -- ===== lisyctrl diagnostic bridge (added) =====
 signal lisy_active : std_logic := '0';
+-- ESP bus grant: the companion pulls the board reset line (S8.2) low to take the
+-- shared SPI bus (NOR/SD/EEPROM programming). Needed because outside diag the FPGA
+-- always drives MOSI/CLK, so holding reset alone never freed the bus.
+signal esp_bus     : std_logic := '0';
 signal lisy_sclk, lisy_mosi, lisy_miso : std_logic;
 signal lisy_u4pb, lisy_u6pa, lisy_u6pb : std_logic_vector(7 downto 0);
+  signal lisy_u5pa : std_logic_vector(3 downto 0);
+  signal lisy_segments : std_logic_vector(1 to 24);
+  signal lisy_txt  : std_logic_vector(319 downto 0) := (others => '0');
+  signal bm_disp2, bm_disp3, bm_disp4 : string(1 to 7);
+  -- 80B diag display writer (10941 latch protocol) -> RIOT-level U5 lines
+  signal d80_pa : std_logic_vector(5 downto 4);
+  signal d80_pb : std_logic_vector(6 downto 0);
+  signal u5pa_disp4, u5pa_disp5 : std_logic;
+  signal u5pb_disp : std_logic_vector(6 downto 0);
 signal u6pa_src, u6pb_src, u4_pb_cpu   : std_logic_vector(7 downto 0);
 signal sd_cs_n, ee_cs_n, cpu_res_n     : std_logic;
 signal lisy_trig : std_logic;   -- long-press of the Gottlieb door test switch
+signal lisy_sound5     : std_logic_vector(4 downto 0);  -- lisyctrl sound code -> gosof80
+signal lisy_sound_trig : std_logic;                     -- lisyctrl sound trigger -> gosof80
+signal sl_tx           : std_logic;                     -- sound_link UART (ESP sound mode)
+signal ball_val        : std_logic_vector(3 downto 0) := "0000";  -- snooped $0072 = GAME IN PROGRESS (0=attract, 1=game); powers up 0 = attract
+-- RAM-snapshot streamer (ram_snoop -> sound_link injection port). Diagnostic only:
+-- mirrors CPU writes to the three RIOT RAMs *and* to the 5101 CMOS RAM, and streams
+-- the 640-value image to the ESP ~1x/s so the ball-in-play address can be found by
+-- correlation instead of guessed ($0072 from PinMAME was disproven on real hardware,
+-- and no RIOT byte behaved like a ball counter -> the 5101 is the remaining candidate).
+signal snap_riot_wr    : std_logic;                     -- any RIOT RAM write
+signal snap_5101_wr    : std_logic;                     -- 5101 (Z5) write
+signal snap_wr_en      : std_logic;                     -- either of the above
+signal snap_wr_addr    : std_logic_vector(9 downto 0);  -- shadow index (see ram_snoop header)
+signal snap_wr_data    : std_logic_vector(7 downto 0);  -- mirrored data byte
+signal snap_data_s     : std_logic_vector(7 downto 0);  -- byte offered to sound_link
+signal snap_req_s      : std_logic;
+signal snap_ack_s      : std_logic;
+signal ta_cfg_start    : std_logic_vector(23 downto 0); -- lisyctrl TA_START -> tourney countdown (0 => generic)
+signal ta_cfg_decay    : std_logic_vector(23 downto 0); -- lisyctrl TA_DECAY -> tourney countdown (0 => generic)
+signal ay_audio        : std_logic_vector(9 downto 0);  -- [AY FIT TEST] AY core output (kept via LED_ON)
 
+-- ===========================================================================
+-- ESP -> FPGA CONTROL LINK (disp_inject).  One wire, ESP GPIO9 -> Audio_RX /
+-- PIN_2, 8N1 115200, RX only; the reverse direction is the existing sound_link
+-- UART on the Debug pin.  Two frame types (see lib_common/disp_inject.vhd):
+--   0xFF + 7 ASCII  = the string to overlay on the glass  -> dinj_str/dinj_valid
+--   0xFE + 1 flags  = b0 auto-restart, b1 display overlay, b2 kill (edge),
+--                     b3 long kill (optional)             -> dinj_ctrl/dinj_kill
+-- disp_inject clears b0/b1 by itself after 2 s without a valid control frame, so
+-- a dead or unplugged ESP cannot leave the machine restarting games or holding
+-- the glass.  Everything below therefore powers up OFF.
+-- ===========================================================================
+signal dinj_str        : string(1 to 7);                -- last complete display frame
+signal dinj_valid      : std_logic;                     -- '1' while display frames keep arriving
+signal dinj_ctrl       : std_logic_vector(6 downto 0);  -- latched control flags (fail-safed)
+signal dinj_kill       : std_logic;                     -- 1-clk one-shot, rising edge of flags b2
+-- ESP -> FPGA link telemetry (2026-07-27).  The FPGA->ESP UART was always
+-- observable; this direction was not, so a dead overlay could not be told from a
+-- dead wire.  dinj_rxc counts every byte disp_inject DEFRAMES (mod 15, see
+-- disp_inject's rx_cnt comment); both it and {dvalid,ctrl(2..0)} are shipped to
+-- the ESP as sound_link level tokens 0xB0|rxc and 0xE0|dinj.
+signal dinj_rxc        : std_logic_vector(3 downto 0);  -- deframed-byte counter, 0..14
+
+-- ===========================================================================
+-- TIME-ATTACK part 1: AUTO-RESTART by synthetic switch-matrix closures
+-- ---------------------------------------------------------------------------
+-- Rationale (Pstore 2026-07-25).  Freezing the ball counter ($0109, proven on HW
+-- to BE the ball-in-play byte) did NOT stop game-over: the System 80 ROM decides
+-- game-over from something else.  Address hunting abandoned.  Instead we use the
+-- machine's own controls: the FPGA *is* the switch matrix, so it can press the
+-- coin and the credit/start button for the player.
+--
+-- Injection point: the U4 RIOT port-A returns.  bontango's free-play feature
+-- already proves this works -- `SW_Freeplay` ORs a '1' onto return 7 while
+-- strobe 1 is high and the ROM books a coin.  Polarity (SYS80.vhd comment at the
+-- credit detector): "due to inverters on the board a switch is active when both
+-- strobe and return are HIGH", i.e. drive U4_pa_in(7)='1' while U4_PB(n)='1'.
+--   strobe 1 / return 7 = LEFT COIN     (from the Freeplay process)
+--   strobe 4 / return 7 = CREDIT/START  (from the commented reference line and
+--                                        from detect_credit_sw* below)
+-- NOTE we deliberately do NOT gate on U5_pb_out(7) (the DIP-read phase).  The
+-- proven Freeplay injection does not gate on it either, and this machine was
+-- measured parking that line in the DIP-read state during attract, which is
+-- exactly what broke the earlier *detector*; gating here could mean the closure
+-- is never presented at all.  Cost: for <=150 ms one DIP bit may read back as a
+-- '1'; the ROM re-reads the DIPs continuously, so it self-corrects.
+--
+-- Injection is invisible to the FPGA's own detect_sw* blocks (they watch the raw
+-- pin vector U4_pa_in, we OR in one stage later, at the RIOT port) -- so an
+-- injected press can never re-trigger sim_coin or the NVRAM credit trigger.
+-- ===========================================================================
+signal auto_restart_en : std_logic;                     -- master enable for the sequencer
+signal sw_inject       : std_logic_vector(7 downto 0);  -- synthetic returns, ORed into U4 PA
+signal inj_coin        : std_logic := '0';              -- press LEFT COIN    (strobe 1 / return 7)
+signal inj_credit      : std_logic := '0';              -- press CREDIT/START (strobe 4 / return 7)
+
+-- ---------------------------------------------------------------------------
+-- game-over / attract detection -- v2, retargeted 2026-07-25 after HW test.
+--
+-- REJECTED, do not go back to these:
+--   * game_running: count_to_zero latches d_out='1' after 255 CPU IRQ edges and
+--     never clears it again except on reset_l='0'.  It is a "CPU booted" flag --
+--     that is why /link reported running:true while the machine sat in attract.
+--   * game_over_relay (lamp latch DS1 b0): tried in build #1 with a self-learning
+--     polarity detector.  Tested on the real Volcano: the indicator never moved at
+--     game over -> DS1 b0 is NOT the game-over signal on this machine.  It stays
+--     wired to the EEprom NVRAM save trigger (unchanged), just not used here.
+--
+-- USED: CPU $0072 (RIOT U4 RAM) = GAME IN PROGRESS.  0 in attract, 1 during a
+-- game, back to 0 at game over.  Proven on hardware twice and independently:
+-- live $0072 telemetry across a full 3-ball game (0 -> 1 -> 0), and the RAM
+-- snapshots (attract=0, 5/5 in-game samples=1, immediately post-game=0).
+-- The value is already available as `ball_val`, latched by the BALL_SNOOP
+-- process on every CPU write to $0072; it powers up at 0 = attract, which is
+-- also the correct safe state before the ROM has written anything.
+-- (The real ball counter is $0109, 0-based -- but freezing it does not stop
+--  game-over, which is why we inject buttons instead.)
+signal ar_raw_attract  : std_logic;                     -- undebounced: '1' when $0072 = 0
+signal in_attract      : std_logic := '1';              -- debounced: '1' = no game in progress
+signal ar_db_cnt       : unsigned(21 downto 0) := (others => '0');  -- debounce timer (~84 ms max)
+signal ar_gamecnt      : unsigned(27 downto 0) := (others => '0');  -- "game has really run" timer
+signal game_qual       : std_logic := '0';              -- '1' once a game ran >= AR_T_GAME
+
+type AR_STATE_T is (AR_IDLE, AR_SETTLE, AR_COIN_ON, AR_COIN_OFF, AR_CRED_ON, AR_VERIFY, AR_DONE);
+signal ar_state        : AR_STATE_T := AR_IDLE;
+signal ar_cnt          : unsigned(27 downto 0) := (others => '0');
+signal ar_tries        : unsigned(1 downto 0)  := (others => '0');
+
+-- ===========================================================================
+-- TIME-ATTACK part 2: END-ON-DEMAND (slam).
+-- ---------------------------------------------------------------------------
+-- INVESTIGATION 2026-07-25 -- "does GottFA's slam DIP disable this?"  NO.  Trace:
+--
+--   opt_slam_fix_open  <= not game_option(3);        -- ~line 404
+--   opt_slam_fix_close <= not game_option(4);        -- ~line 405
+--   slam <= '0'      when opt_slam_fix_open  = '1'   -- ~line 511
+--        else '1'    when opt_slam_fix_close = '1'
+--        else U5_PA_7;                               -- the real slam pin (PIN_91)
+--   slam_to_cpu <= slam xor kill_pulse;              -- ~line 927  <-- AFTER the mux
+--   U5_IO: pa_in => slam_to_cpu & "0000000";         -- ~line 1256 -> 6502 reads it
+--
+-- The two DIP options only choose the RESTING level of the line; the XOR that
+-- makes the kill pulse sits one stage further down, between that mux and the
+-- R6532.  So in all three configurations -- forced open, forced closed, or the
+-- real switch -- the level the 6502 sees still moves for the whole pulse.  Only a
+-- kill implemented as "force slam to a FIXED level" would have been masked by the
+-- DIPs, and that is deliberately not how this is built.
+--
+-- Polarity does not have to be known either, and that is the second half of the
+-- argument: whatever level the machine currently rests at is provably the
+-- NOT-slammed level for this ROM, because the machine plays normally.  XOR moves
+-- it to the complementary level, which is therefore the slammed one.  This is why
+-- slam was chosen over the tilt switch or the outhole: tilt/outhole positions in
+-- the switch matrix are game-specific (and tilt only ends the BALL), whereas the
+-- slam input is one dedicated pin at a fixed place in the System-80 architecture.
+-- A CPU reset would also be game-agnostic but was rejected as unsafe: the R6532s
+-- are not reset with the CPU, so a solenoid that happened to be energised would
+-- stay latched on -> coil burn.  Nothing here touches a solenoid driver.
+--
+-- What this does NOT prove is what the game ROM then decides to do; that needs the
+-- machine.  Hence the optional long closure below: if 100 ms turns out not to be
+-- enough for this ROM's slam debounce, control-frame bit3 stretches it to 500 ms
+-- without re-flashing the FPGA.
+-- ===========================================================================
+signal game_kill       : std_logic;                     -- pulse '1' -> end the game now
+signal kill_pulse      : std_logic := '0';
+signal kill_d          : std_logic := '0';
+signal kill_cnt        : unsigned(24 downto 0) := (others => '0');  -- 25 bit: must hold AR_T_SLAM_L
+signal kill_len        : natural range 0 to 500 * 50000;            -- selected closure length
+signal slam_to_cpu     : std_logic;                     -- what U5 PA7 shows the 6502
+
+-- timing constants (clk_50 ticks)
+constant AR_MS         : natural := 50000;              -- 1 ms at 50 MHz
+constant AR_T_DB       : natural :=    50 * AR_MS;      -- $0072 must hold a new value 50 ms to count
+constant AR_T_GAME     : natural :=  3000 * AR_MS;      -- 3 s out of attract = a game really ran
+constant AR_T_SETTLE   : natural :=  2000 * AR_MS;      -- 2 s after game over before pressing anything
+constant AR_T_PRESS    : natural :=   150 * AR_MS;      -- closure length of an injected button press
+constant AR_T_GAP      : natural :=   400 * AR_MS;      -- release time between coin and credit
+constant AR_T_VERIFY   : natural :=  3000 * AR_MS;      -- how long we wait to see the game start
+constant AR_T_SLAM     : natural :=   100 * AR_MS;      -- slam closure length (default)
+-- Optional longer closure, selected by control-frame bit3.  Only a fallback for the
+-- field: if this ROM's slam handler needs more than ~100 consecutive IRQ samples,
+-- the ESP can stretch the closure without a re-flash.  Kept at 500 ms rather than
+-- seconds so the ROM cannot read it as a STUCK slam switch.
+constant AR_T_SLAM_L   : natural :=   500 * AR_MS;      -- slam closure length (ctrl bit3 = 1)
+constant AR_TRIES_MAX  : natural := 2;                  -- => 3 attempts total, then give up
+-- '1' = drop a coin (strobe 1) before pressing start, so auto-restart also works
+-- on a machine with zero credits banked.  Set to '0' if the coin audit must stay clean.
+constant AR_INJECT_COIN : std_logic := '1';
 
 begin
 
 -- LEDs GottFA80
-LED_Int <= not game_running;
+-- [AUTO-RESTART DIAG] LED_Int used to show `not game_running`, which is useless:
+-- game_running latches HIGH ~255 IRQs after reset and never falls again (see
+-- count_to_zero), so the LED was static after boot.  Show the game-over/attract
+-- detector instead so the auto-restart trigger can be watched on the board:
+-- LED_Int follows in_attract ('1' = attract / no game, '0' = a game is running).
+-- It must therefore CHANGE STATE when a game starts and change back at game over
+-- -- that is the first thing to check on hardware.
+-- Revert with:  LED_Int <= not game_running;
+LED_Int <= in_attract;
 LED_SDcard <= SDcard_error;
-LED_ON <= '0'; --RTH 
+-- [AY FIT TEST] keep-alive: reduce the AY audio output into LED_ON so synthesis can't prune the core
+LED_ON <= ay_audio(0) xor ay_audio(1) xor ay_audio(2) xor ay_audio(3) xor ay_audio(4)
+        xor ay_audio(5) xor ay_audio(6) xor ay_audio(7) xor ay_audio(8) xor ay_audio(9);
 
 
 ----------------------
@@ -253,20 +481,136 @@ opt_slam_fix_close		<= not game_option(4);
 ----------------------
 -- boot message
 ----------------------
+-- Tournament time-attack: countdown subsystem -> shows on display1 during a time-attack game (Pstore)
+ta_rst <= not reset_l;
+-- [AY FIT TEST] TADISP (tournament display chain ~463 LE) DROPPED to free room.
+-- 2026-07-25: the overlay is back, but the countdown now lives on the ESP -- it
+-- formats the 7 characters itself and streams them over the one-wire UART, which
+-- costs the FPGA only the receiver (disp_inject) instead of the whole bin_to_bcd /
+-- value_to_dispstr / tourney_countdown chain.
+-- ta_arm needs BOTH the enable flag AND live frames: dinj_valid self-clears ~1 s
+-- after the last display frame, so if the ESP stops mid-game the glass returns to
+-- the game by itself even if ctrl(1) were somehow stuck high.
+ta_arm   <= dinj_ctrl(1) and dinj_valid;
+ta_dstr  <= dinj_str;
+ta_value <= (others => '0');
+ta_dead  <= '0';
+-- ===========================================================================
+-- TIME-ATTACK DISPLAY INJECTION -- v3, 2026-07-27.
+--
+-- THE FLAW BEING FIXED.  v2 armed boot_message for the whole glass: the digit
+-- strobes came from bm_digit_strobe and all 24 segment lines from bm_segments,
+-- and bm_disp2/3/4 were blanked.  Result: while a time-attack game was being
+-- PLAYED the player watched a countdown and could not see their score.
+--
+-- THE MAPPING (this is the load-bearing claim -- reasoning, then the test).
+-- U5 PA0..PA3 is a 4-bit digit strobe; an external 1-of-16 decoder (74154, Z33
+-- on the stock MPU) turns it into 16 digit-enable lines that are common to every
+-- display in the backbox.  The three 8-bit segment groups on J2 carry the DATA:
+--     group A = disp_segments(1..8)   player 1 + player 2
+--     group B = disp_segments(9..16)  player 3 + player 4
+--     group C = disp_segments(17..24) status (credits / ball in play)
+-- Which physical digit lights is therefore (segment group) x (strobe value), and
+-- that relation is BACKBOX WIRING -- it does not depend on who drives the bus.
+-- The game ROM and boot_message are two drivers of the same map, so the map that
+-- boot_message uses is the map the ROM uses.  boot_message (lib_common) is the
+-- proven reference, because its banner lands on the right displays on this very
+-- machine; reading its refresh cycle out gives, for group A:
+--     strobe 0,1,2,3,4,5  -> display1 chars 7,6,5,4,3,2   (player 1, units first)
+--     strobe 15           -> display1 char 1              (7th digit, 80A glass)
+--     strobe 6,7,8,9,A,B  -> display2 chars 7,6,5,4,3,2   (player 2, units first)
+--     strobe 12           -> display2 char 1              (7th digit, 80A glass)
+-- and the identical pattern on group B for display3 / display4.  Group C is
+-- written only at strobes 12..15 = the four status digits.
+--   => THE PLAYER-2 DISPLAY IS SEGMENT GROUP A DURING STROBES 6..12, AND NOTHING
+--      ELSE ON THE GLASS IS.  Overriding group A only in that window therefore
+--      cannot touch player 1's score (strobes 0..5,15) nor the status display
+--      (group C).  Verified by simulation: sim/tb_ta_overlay.vhd sweeps all 16
+--      strobes for every sel value and asserts that exactly one segment group is
+--      claimed, only inside the intended window, with the expected glyph.
+--   NOT proven from code: whether the player-2 digits read left-to-right in the
+--      same order as player 1 (they must -- identical modules on a shared bus --
+--      but only the glass can confirm), and whether a 6-digit System-80 glass has
+--      anything at all wired to strobes 12..15 on groups A/B.  ta_sel 101/110
+--      exist to answer that second question on the real machine.
+--
+-- WHERE THE STRING GOES: dinj_ctrl(6 downto 4), reserved-and-sent-as-0 by the
+-- current ESP firmware, so the default needs no ESP change:
+--     000  PLAYER 2   (default -- free in a one-player game)   <-- the fix
+--     001  PLAYER 1   (same place as the old overlay; sanity check)
+--     010  PLAYER 4
+--     011  PLAYER 3
+--     100  STATUS / credit display
+--     101  PROBE: group A on strobes 12..15 (positions a 6-digit ROM never writes)
+--     110  PROBE: group B on strobes 12..15
+--     111  FULL OVERLAY = exactly the v2 behaviour, kept as an escape hatch
+--
+-- FALLBACK: when no game is in progress the ROM's multiplex is showing attract,
+-- there is no score to protect, and the countdown should be as big as possible --
+-- so ta_full is forced whenever in_attract='1' (the $0072 detector, proven twice
+-- on this machine) or before the CPU has booted (game_running='0').  Both failure
+-- modes of that detector are benign: stuck '1' = today's behaviour, stuck '0' =
+-- countdown on player 2 with the score intact.
+--
+-- TWO-PLAYER RISK: in a 2-player game the ROM owns display 2 as well, and the
+-- countdown would fight the second player's score.  That is exactly what ta_sel
+-- is for -- 010 moves the string to player 4 (free in 1..3-player games).  There
+-- is no player display that is free in a 4-player game; only the strobe-12..15
+-- probe positions could be, which is why 101/110 exist.
+-- ===========================================================================
+ta_sel   <= dinj_ctrl(6 downto 4);
+-- full glass takeover: no game running, or the ESP explicitly asked for it
+ta_full  <= ta_arm and (in_attract or (not game_running) or
+                        (ta_sel(2) and ta_sel(1) and ta_sel(0)));
+-- one display only: a game IS in progress, the ROM keeps its own multiplex
+ta_part  <= ta_arm and (not ta_full);
+
+TAOVL : entity work.ta_overlay
+port map(
+	clk    => clk_50,
+	strobe => U5_pa_out(3 downto 0),   -- the strobe the ROM is driving RIGHT NOW
+	sel    => ta_sel,
+	dstr   => ta_dstr,
+	hit_a  => ta_hit_a,
+	hit_b  => ta_hit_b,
+	hit_c  => ta_hit_c,
+	seg    => ta_seg
+	);
+-- [AY FIT TEST] dropped 2026-07-09: freed ~2 LABs for the disp80b_diag FSM
+-- (design hit 394/392 LABs). It was a fit-headroom placeholder only (output
+-- went to LED_ON). Re-instantiate when the real AY integration lands.
+ay_audio <= (others => '0');
+-- boot_message paints the WHOLE glass in one refresh cycle: display1/display2 are
+-- the two halves of segment group A (player 1 / player 2), display3/display4 the
+-- two halves of group B (player 3 / player 4), status_d is group C.  So when the
+-- overlay is armed every other field must be blanked, otherwise the injected string
+-- would sit in the middle of the boot banner (SW version / game# / build date /
+-- option digits).  status_d is already all blanks.
+-- v3 NOTE: boot_message now only ever reaches the pins in the FULL-overlay case
+-- (ta_full: attract / pre-boot / ta_sel="111").  While a game is running the
+-- countdown comes from TAOVL instead and boot_message's output is unused, so the
+-- ta_arm condition below is left as it was -- it costs nothing and keeps the
+-- banner instantly ready the moment ta_full goes high again at game over.
+bm_disp1 <= ta_dstr when ta_arm = '1' else "    611";               -- injected string when armed, else SW version
+bm_disp2 <= "       " when ta_arm = '1' else "    " & game_dig2 & game_dig1 & game_dig0;
+bm_disp3 <= "       " when ta_arm = '1' else " 050963";
+bm_disp4 <= "       " when ta_arm = '1' else " " & g_opt_dig1 & g_opt_dig0 & "  " & sb_opt_dig1 & sb_opt_dig0;
+bm_show  <= '1' when (game_running = '0' or ta_arm = '1') else '0';  -- run at boot OR in a time-attack game
+
 BM: entity work.boot_message
 port map(
-	clk_in		=> cpu_clk, 	
+	clk_in		=> cpu_clk,
 	-- Control/Data Signals,
-   show  => not game_running,
+   show  => bm_show,
 	SD_error => not SDcard_error,
 	-- output
 	bm_digit_strobe	=> bm_digit_strobe,
 	bm_segments => bm_segments,
-	-- input (display data)		
-	display1	=> "    611",  -- SW VERSION TO BE PUT HERE
-	display2	=> "    " & game_dig2 & game_dig1 & game_dig0,	
-	display3	=> " 050963",
-	display4	=> " " & g_opt_dig1 & g_opt_dig0 & "  " & sb_opt_dig1 & sb_opt_dig0,
+	-- input (display data)
+	display1	=> bm_disp1,  -- time-attack countdown (when armed) or SW VERSION
+	display2	=> bm_disp2,
+	display3	=> bm_disp3,
+	display4	=> bm_disp4,
 	error_disp4 => "0000000",
 	status_d	=> "       "	
 	);
@@ -349,20 +693,35 @@ slam <= '0' when opt_slam_fix_open = '1' else --slam open for late 80B games
 -- In diag mode the FPGA tri-states the SPI bus and becomes an SPI slave, the
 -- 6502 is held in reset, and lisyctrl drives the machine I/O. Default = inactive
 -- => behaviour is identical to the original. See LISYCTRL.md.
-MOSI <= 'Z' when lisy_active = '1' else SDcard_MOSI when reset_l = '0' else EEprom_MOSI;
-CLK  <= 'Z' when lisy_active = '1' else SDcard_CLK  when reset_l = '0' else EEprom_CLK;
+esp_bus <= '1' when reset_sw_stable = '0' else '0';   -- ESP (or S8) asserts reset => bus is the ESP's
+MOSI <= 'Z' when (lisy_active = '1' or esp_bus = '1') else SDcard_MOSI when reset_l = '0' else EEprom_MOSI;
+CLK  <= 'Z' when (lisy_active = '1' or esp_bus = '1') else SDcard_CLK  when reset_l = '0' else EEprom_CLK;
 MISO <= lisy_miso when lisy_active = '1' else 'Z';
 lisy_sclk <= CLK;
 lisy_mosi <= MOSI;
-CS_SDcard <= '1' when lisy_active = '1' else sd_cs_n;
-CS_EEprom <= '1' when lisy_active = '1' else ee_cs_n;
+-- handshake to the ESP32 companion on the Debug pin: '1' = lisyctrl/diag mode is
+-- active => the shared SPI bus is released to the ESP (FPGA is now an SPI slave,
+-- 6502 held in reset, SD/EEPROM deselected). The ESP polls this before driving.
+-- In the ESP-sound build (and the hybrid build) Debug is instead driven by the sound_link
+-- UART (it carries the diag token + sound/game) -- see GEN_ESP_SND / GEN_HYB_LINK. So only
+-- drive the level here when neither ESP path is active (stock / PIN-2-sound builds).
+GEN_DBG_LVL: if (not esp_sound) and (not hybrid) generate
+Debug <= lisy_active;
+end generate GEN_DBG_LVL;
+CS_SDcard <= 'Z' when esp_bus = '1' else '1' when lisy_active = '1' else sd_cs_n;
+CS_EEprom <= '1' when (esp_bus = '1' or lisy_active = '1') else ee_cs_n;  -- v2: KEEP the M95256 deselected during the ESP grant (no board pull-up -> a floating CS could let it fight the NOR on MISO)
 cpu_res_n <= '0' when lisy_active = '1' else reset_l;
 u6pa_src  <= lisy_u6pa when lisy_active = '1' else U6_pa_out;
+-- Tournament: neutralise a free-game solenoid (knocker) when armed. Placeholder code = no block. -- Pstore
+TBLOCK: entity work.tourney_block
+	generic map ( SEL_HI => 3, SEL_LO => 0, BLOCK_CODE => "1111", NOOP_CODE => "1111" )
+	port map ( port_in => u6pa_src, sol_active => '1', tournament_mode => tournament_mode, port_out => u6pa_masked );
 u6pb_src  <= lisy_u6pb when lisy_active = '1' else U6_pb_out;
 U4_PB     <= lisy_u4pb when lisy_active = '1' else u4_pb_cpu;
 -- mode entry: a LONG-PRESS of the Gottlieb door test switch enters diag mode;
 -- any reset/reboot (reset_l='0') exits it. (lisy_trig = detect_test_sw long_push,
 -- which is active from attract/idle -- the usual place to run diagnostics.)
+GEN_LISY: if lisy_enable generate
 LISY_MODE: process begin
 	wait until rising_edge(clk_50);
 	if reset_l = '0' then
@@ -376,10 +735,27 @@ port map(
 	clk => clk_50, active => lisy_active,
 	sclk => lisy_sclk, mosi => lisy_mosi, miso => lisy_miso,
 	o_U4_PB => lisy_u4pb, i_U4_PA => U4_pa_in,
-	o_U5_PA => open, o_U5_PB7 => open,
-	o_U6_PA => lisy_u6pa, o_U6_PB => lisy_u6pb, o_segments => open,
+	o_U5_PA => lisy_u5pa, o_U5_PB7 => open,
+	o_U6_PA => lisy_u6pa, o_U6_PB => lisy_u6pb, o_segments => lisy_segments,
+	o_sound => lisy_sound5, o_sound_trig => lisy_sound_trig,
+	o_txt => lisy_txt,
+	o_tournament => tournament_mode,                  -- arms time-attack display + tourney_block (Pstore)
+	o_ta_start => ta_cfg_start, o_ta_decay => ta_cfg_decay,  -- time-attack start/decay -> countdown (Pstore)
 	i_DIP_Ret => '0' & DIP_Return, i_slam => slam, wd_tripped => open
 );
+end generate GEN_LISY;
+
+-- lisyctrl excluded: drive the shared signals to constants so the arbitration
+-- muxes fold to stock (lisy_active='0' => MISO=Z/input, MOSI/CLK=SD or EEPROM).
+GEN_NOLISY: if not lisy_enable generate
+	lisy_active <= '0';
+	lisy_miso   <= 'Z';
+	lisy_u4pb   <= (others => '0');
+	lisy_u6pa   <= (others => '0');
+	lisy_u6pb   <= (others => '0');
+	ta_cfg_start <= (others => '0');   -- no lisyctrl -> 0 => tourney countdown uses its generic defaults
+	ta_cfg_decay <= (others => '0');
+end generate GEN_NOLISY;
 
 ---------------------
 -- count ints
@@ -413,7 +789,8 @@ port map(
 ---------------------
 -- SD card stuff
 ----------------------
-SD_CARD: entity work.SD_Card
+SD_CARD: entity work.nor_flash
+generic map( spi_hz => 2000000 )   -- ESP proved reads at 1-2 MHz through the 270R bus; raise later
 port map(
 	--no_of_sectors => x"20", -- 32 sectors per rom
 	--
@@ -516,8 +893,8 @@ game_rom2_cs	<= '1' when cpu_addr(13 downto 11) ="010" and cpu_addr(15) = '1' an
 
 
 -- Bus control
-cpu_din <= 
-	game_rom2_dout when game_rom2_cs='1' else -- late 80B overwrites selection 
+cpu_din <=
+	game_rom2_dout when game_rom2_cs='1' else -- late 80B overwrites selection
 	U4_RAM_dout when U4_RAM_cs='1' else
 	U5_RAM_dout when U5_RAM_cs='1' else
 	U6_RAM_dout when U6_RAM_cs='1' else
@@ -548,9 +925,237 @@ Freeplay: process(sim_coin, U4_PB, opt_freeplay)
 		SW_Freeplay(7) <= '1';
 	 else	
 		SW_Freeplay(7) <= '0';
-	end if;	
- end process;  
-	
+	end if;
+ end process;
+
+--------------------------------------------------------------------------------
+-- ESP -> FPGA CONTROL LINK  (one wire, ESP GPIO9 -> Audio_RX / PIN_2)
+--------------------------------------------------------------------------------
+-- Instantiated unconditionally: PIN_2 is a plain input in BOTH sound builds now
+-- (GEN_FPGA_SND passes DFP_tx => open, GEN_ESP_SND never used the pin), so the
+-- link works whichever way esp_sound is set.
+-- Reset: `not reset_l`, the same active-high reset the sound_link and ram_snoop
+-- blocks use.  Consequence, and it is the wanted one: everything the ESP controls
+-- powers up OFF and stays off until the companion actually asks for it.
+DINJ : entity work.disp_inject
+generic map (
+	clk_hz     => 50000000,
+	baud       => 115200,
+	hold_ms    => 1000,     -- display overlay expires 1 s after the last 0xFF frame
+	ctrl_to_ms => 2000      -- fail-safe: ctrl b0/b1 cleared after 2 s of ESP silence
+)
+port map (
+	clk            => clk_50,
+	rst            => not reset_l,
+	rx             => Audio_RX,
+	dstr           => dinj_str,
+	dvalid         => dinj_valid,
+	ctrl           => dinj_ctrl,
+	kill_pulse_req => dinj_kill,
+	rx_cnt         => dinj_rxc          -- telemetry: bytes deframed on PIN_2 (mod 15)
+);
+
+--------------------------------------------------------------------------------
+-- TIME-ATTACK / AUTO-RESTART  (Pstore 2026-07-25)
+--------------------------------------------------------------------------------
+-- Armed by the ESP: CONTROL frame bit0.  This REPLACES the hardwired '1' used for
+-- the 2026-07-25 hardware validation of the FSM -- the sequencer itself is byte
+-- for byte the one that was proven on the Volcano, only its enable moved.
+-- disp_inject clears bit0 on its own after 2 s without a control frame, so a
+-- crashed or unplugged ESP cannot leave the machine restarting games forever.
+auto_restart_en <= dinj_ctrl(0);
+
+-- END-ON-DEMAND: CONTROL frame bit2, rising edge -> a one-clock one-shot from
+-- disp_inject, which GAME_KILL_P stretches into the slam closure below.
+game_kill <= dinj_kill;
+
+-- The synthetic closure.  Combinational on the live strobe, exactly like the
+-- proven Freeplay coin sim.  Never active in diag (there lisyctrl owns U4_PB and
+-- the 6502 is held in reset anyway).
+sw_inject(7) <= ( (inj_coin and U4_PB(1)) or (inj_credit and U4_PB(4)) ) and not lisy_active;
+sw_inject(6 downto 0) <= "0000000";
+
+-- '1' = no game in progress.  $0072 (= ball_val, latched by BALL_SNOOP) is 0 in
+-- attract and 1 during a game -- proven on hardware, see the header block.
+ar_raw_attract <= '1' when ball_val = "0000" else '0';
+
+AUTO_RESTART: process(clk_50)
+begin
+  if rising_edge(clk_50) then
+
+    ---------------------------------------------------------------------------
+    -- 1) debounce the game-in-progress flag.
+    --    $0072 only changes when the 6502 writes it, so it is intrinsically
+    --    clean at the ROM level; a 6502 read-modify-write cannot even produce a
+    --    false 0 during a game (its dummy write replays the OLD value, which is
+    --    1 while a game runs).  The debounce is there for the FPGA side: the
+    --    BALL_SNOOP latch re-samples cpu_dout on EVERY clk_50 edge for which the
+    --    write condition holds (~56 edges per CPU cycle), so it can capture the
+    --    bus before cpu_dout has settled.  That never mattered while ball_val
+    --    was telemetry only; now that it arms a game restart, require the new
+    --    value to hold for AR_T_DB (50 ms) before it is believed.
+    ---------------------------------------------------------------------------
+    if reset_l = '0' then
+      in_attract <= '1';                    -- power-up / reset = attract
+      ar_db_cnt  <= (others => '0');
+    elsif ar_raw_attract = in_attract then
+      ar_db_cnt <= (others => '0');         -- agrees: nothing to do
+    elsif ar_db_cnt >= AR_T_DB then
+      in_attract <= ar_raw_attract;         -- new value held long enough: accept
+      ar_db_cnt  <= (others => '0');
+    else
+      ar_db_cnt <= ar_db_cnt + 1;
+    end if;
+
+    ---------------------------------------------------------------------------
+    -- 2) qualifier: only a game that really ran (>= AR_T_GAME out of attract)
+    --    may arm an auto-restart.  Belt-and-braces on top of the debounce: no
+    --    transient on $0072 can ever look like a whole game.
+    ---------------------------------------------------------------------------
+    if reset_l = '0' then
+      ar_gamecnt <= (others => '0');
+      game_qual  <= '0';
+    else
+      if in_attract = '1' then
+        ar_gamecnt <= (others => '0');
+      elsif ar_gamecnt < AR_T_GAME then
+        ar_gamecnt <= ar_gamecnt + 1;
+      end if;
+      if ar_gamecnt >= AR_T_GAME then
+        game_qual <= '1';
+      end if;
+    end if;
+
+    ---------------------------------------------------------------------------
+    -- 3) the sequencer: game over -> settle -> [coin] -> credit -> verify,
+    --    bounded to AR_TRIES_MAX+1 attempts, then latched off until a game runs
+    --    again.  It can therefore never free-run.
+    ---------------------------------------------------------------------------
+    if reset_l = '0' or lisy_active = '1' or auto_restart_en = '0' then
+      ar_state   <= AR_IDLE;
+      ar_cnt     <= (others => '0');
+      ar_tries   <= (others => '0');
+      inj_coin   <= '0';
+      inj_credit <= '0';
+    else
+      case ar_state is
+
+        when AR_IDLE =>
+          inj_coin   <= '0';
+          inj_credit <= '0';
+          ar_cnt     <= (others => '0');
+          ar_tries   <= (others => '0');
+          if game_qual = '1' and in_attract = '1' then
+            game_qual <= '0';                 -- consume it (this wins over the set above)
+            ar_state  <= AR_SETTLE;
+          end if;
+
+        -- let the ROM finish its game-over sequence and settle into attract.
+        when AR_SETTLE =>
+          if in_attract = '0' then            -- a game started meanwhile -> stand down
+            ar_state <= AR_IDLE;
+          elsif ar_cnt >= AR_T_SETTLE then
+            ar_cnt   <= (others => '0');
+            ar_state <= AR_COIN_ON;
+          else
+            ar_cnt <= ar_cnt + 1;
+          end if;
+
+        -- book a coin so a credit exists to start on.
+        when AR_COIN_ON =>
+          inj_coin <= AR_INJECT_COIN;
+          if ar_cnt >= AR_T_PRESS then
+            inj_coin <= '0';
+            ar_cnt   <= (others => '0');
+            ar_state <= AR_COIN_OFF;
+          else
+            ar_cnt <= ar_cnt + 1;
+          end if;
+
+        when AR_COIN_OFF =>
+          inj_coin <= '0';
+          if ar_cnt >= AR_T_GAP then
+            ar_cnt   <= (others => '0');
+            ar_state <= AR_CRED_ON;
+          else
+            ar_cnt <= ar_cnt + 1;
+          end if;
+
+        -- press the credit / start button.
+        when AR_CRED_ON =>
+          inj_credit <= '1';
+          if ar_cnt >= AR_T_PRESS then
+            inj_credit <= '0';
+            ar_cnt     <= (others => '0');
+            ar_state   <= AR_VERIFY;
+          else
+            ar_cnt <= ar_cnt + 1;
+          end if;
+
+        when AR_VERIFY =>
+          inj_credit <= '0';
+          if in_attract = '0' then            -- a game is running: done
+            ar_state <= AR_IDLE;
+          elsif ar_cnt >= AR_T_VERIFY then
+            ar_cnt <= (others => '0');
+            if ar_tries >= AR_TRIES_MAX then
+              ar_state <= AR_DONE;
+            else
+              ar_tries <= ar_tries + 1;
+              ar_state <= AR_COIN_ON;
+            end if;
+          else
+            ar_cnt <= ar_cnt + 1;
+          end if;
+
+        -- gave up.  Nothing more happens until a game runs again (by any means).
+        when AR_DONE =>
+          inj_coin   <= '0';
+          inj_credit <= '0';
+          if in_attract = '0' then
+            ar_state <= AR_IDLE;
+          end if;
+
+      end case;
+    end if;
+  end if;
+end process;
+
+--------------------------------------------------------------------------------
+-- END-ON-DEMAND: pulse the slam line for kill_len on a rising edge of game_kill.
+-- Polarity-free: we XOR, i.e. we move the line AWAY from its resting level, which
+-- is what a real slam does whether the switch idles open or closed -- and, crucially,
+-- the XOR is applied AFTER the opt_slam_fix_open/close mux, so the GottFA DIP options
+-- cannot mask it (see the INVESTIGATION block in the declarations).
+-- Now actually exercised: game_kill = the ESP control-frame bit2 one-shot.
+--------------------------------------------------------------------------------
+slam_to_cpu <= slam xor kill_pulse;
+
+-- 100 ms by default (protocol contract); 500 ms if the ESP sets control bit3.
+kill_len <= AR_T_SLAM_L when dinj_ctrl(3) = '1' else AR_T_SLAM;
+
+GAME_KILL_P: process(clk_50)
+begin
+  if rising_edge(clk_50) then
+    kill_d <= game_kill;
+    if reset_l = '0' then
+      kill_pulse <= '0';
+      kill_cnt   <= (others => '0');
+    elsif kill_pulse = '0' then
+      if game_kill = '1' and kill_d = '0' then
+        kill_pulse <= '1';
+        kill_cnt   <= (others => '0');
+      end if;
+    else
+      if kill_cnt >= kill_len then
+        kill_pulse <= '0';
+      else
+        kill_cnt <= kill_cnt + 1;
+      end if;
+    end if;
+  end if;
+end process;
+
 -- detect credit and test_switch for trigger
 -- due to iverters on the borad switch is active when both strobe and return are HIGH
 -- switch enable for dips need to be low, Gottlieb does check dips when not in game!?
@@ -582,7 +1187,7 @@ port map(
 	clk    => cpu_clk,
 	sw_strobe => U4_PB(0),
 	sw_return => U4_pa_in(7),
-	sw_enable => U5_pb_out(7),
+	sw_enable => '0',
 	short_push => test_sw,
 	long_push => lisy_trig,   -- lisyctrl: long-press of the door test switch enters diag
 	rst 	=> game_running
@@ -595,28 +1200,34 @@ port map(
 U5_PB_7 <= not U5_pb_out(7); --switch enable
 
 -- determine if we have a 80B system -> no strobes on U5 PA0 .. PA3
-COUNT_STROBES: entity work.count_to_zero
-port map(   
-   Clock => clk_50,
-	count =>"00001111",
-	d_in => U5_pa_out(1), --count only one of  signals				   
-	d_out => not80B,
-	clear => reset_l
-	);
+-- COUNT_STROBES disabled (Pstore, dedicated System-80/Volcano build):
+-- force System-80 numeric display. The 16-edge auto-detect on U5_pa_out(1)
+-- was never validated on System 80 and left not80B='0' => 80B-format
+-- segments on a numeric glass => black display.
+not80B <= '1';
 
 --------------------------------------------------
 -- 80B display routines	
 --------------------------------------------------
-segments_80B(8) <= not U5_pb_out(4); --LD1
-segments_80B(16) <= not U5_pb_out(5); --LD2
-segments_80B(24) <= not U5_pb_out(6); --Reset
+-- 80B diag display: in diag the disp80b_diag FSM replaces the (held) 6502's
+-- RIOT lines so LISYcontrol can write the alphanumeric glass through the very
+-- same latch plumbing the game uses.
+u5pa_disp4 <= d80_pa(4) when lisy_active = '1' else U5_pa_out(4);
+u5pa_disp5 <= d80_pa(5) when lisy_active = '1' else U5_pa_out(5);
+u5pb_disp  <= d80_pb    when lisy_active = '1' else U5_pb_out(6 downto 0);
+DISP80B: entity work.disp80b_diag
+port map( clk => clk_50, active => lisy_active, txt => lisy_txt,
+          o_pa => d80_pa, o_pb => d80_pb );
+segments_80B(8) <= not u5pb_disp(4); --LD1
+segments_80B(16) <= not u5pb_disp(5); --LD2
+segments_80B(24) <= not u5pb_disp(6); --Reset
 -- D0 ... D4
 sn74175_80B_1: entity work.sn74175 
 port map(   
    Clock => clk_50,
-	clk => U5_pa_out(4),
+	clk => u5pa_disp4,
 	clear	=> reset_l,
-	D => not U5_pb_out(3 downto 0),
+	D => not u5pb_disp(3 downto 0),
 	Q => open,
 	Qn(0) => segments_80B(2),
 	Qn(1) => segments_80B(6),
@@ -626,9 +1237,9 @@ port map(
 sn74175_80B_2: entity work.sn74175 
 port map(   
    Clock => clk_50,
-	clk => U5_pa_out(5),
+	clk => u5pa_disp5,
 	clear	=> reset_l,
-	D => not U5_pb_out(3 downto 0),
+	D => not u5pb_disp(3 downto 0),
 	Q => open,
 	Qn(0) => segments_80B(10),
 	Qn(1) => segments_80B(14),
@@ -640,16 +1251,26 @@ port map(
 -- 80/80A display routines	
 --------------------------------------------------
 --digit strobes
-U5_PA(3 downto 0) <= U5_pa_out(3 downto 0) when game_running='1' else bm_digit_strobe;
+-- v3: the strobes are taken away from the ROM ONLY for a full-glass takeover
+-- (ta_full).  In the normal time-attack case (ta_part) the ROM keeps driving its
+-- own multiplex and TAOVL just replaces one segment group inside one strobe
+-- window -- see the TIME-ATTACK DISPLAY INJECTION block above.
+U5_PA(3 downto 0) <= lisy_u5pa when (lisy_active='1' and not80B='1') else U5_pa_out(3 downto 0) when (game_running='1' and ta_full='0') else bm_digit_strobe;  -- only a FULL overlay steals the strobes
 
--- assign display segments dependent on display type		
-disp_segments <= 
---	segments_80B when not80B = '0' else	
---	bm_segments when game_running = '0' else --and U5_pb_out(6) = '1' else  --RTH
---	segments_80;
-	bm_segments when ( game_running = '0' and U5_pb_out(6) = '1') or SDcard_error = '0' else  --RTH
-	segments_80 when not80B = '1' else
-   segments_80B;	
+-- merge the injected character into the ROM's own segment stream: exactly one
+-- group, exactly during the digit strobes that address the chosen display.
+-- ta_seg bit 8 is the Gottlieb comma line and is '0' for every glyph, so the
+-- injected digits carry no comma -- same as the boot banner does today.
+segments_inj(1 to 8)   <= ta_seg when (ta_part = '1' and ta_hit_a = '1') else segments_80(1 to 8);
+segments_inj(9 to 16)  <= ta_seg when (ta_part = '1' and ta_hit_b = '1') else segments_80(9 to 16);
+segments_inj(17 to 24) <= ta_seg when (ta_part = '1' and ta_hit_c = '1') else segments_80(17 to 24);
+
+-- assign display segments dependent on display type
+disp_segments <=
+	lisy_segments when (lisy_active = '1' and not80B = '1') else  -- numeric System-80 diag display test
+	bm_segments when ( ta_full = '1' ) or ( game_running = '0' and U5_pb_out(6) = '1') or SDcard_error = '0' else
+	segments_inj when not80B = '1' else   -- = segments_80, countdown merged in when ta_part='1'
+   segments_80B;
 
 	
 --segments
@@ -707,8 +1328,8 @@ segments_80(24) <= not U5_pb_out(6);
 --------------------------------------------------
 -- solenoids & lamps
 --------------------------------------------------
-U6_PA(4 downto 0) <= not u6pa_src(4 downto 0) when (game_running='1' or lisy_active='1') else "00000"; --sound AND Z31
-U6_PA(7 downto 5) <= u6pa_src(7 downto 5) when (game_running='1' or lisy_active='1') else "111"; -- decoder enable and Sol9
+U6_PA(4 downto 0) <= not u6pa_masked(4 downto 0) when (game_running='1' or lisy_active='1') else "00000"; --sound AND Z31 (via tourney_block)
+U6_PA(7 downto 5) <= u6pa_masked(7 downto 5) when (game_running='1' or lisy_active='1') else "111"; -- decoder enable and Sol9
 U6_PB(3 downto 0) <= not u6pb_src(3 downto 0) when (game_running='1' or lisy_active='1') else "1111"; -- thunk prevention (inverter)
 U6_PB(7 downto 4) <= u6pb_src(7 downto 4) when (reset_l='1' or lisy_active='1') else lamp_ds; -- thunk prevention 
 	
@@ -794,6 +1415,21 @@ port map(
 	wren 		=> U4_RAM_cs and not cpu_wr_n,
 	q			=> U4_RAM_dout
 );	
+-- $0072 snoop.  Originally added as "ball in play" telemetry from the PinMAME
+-- correlation; hardware disproved that reading (the ball counter is $0109) and
+-- proved instead that $0072 is a GAME-IN-PROGRESS flag: 0 in attract, 1 during a
+-- game, 0 again at game over (live 0->1->0 trace over a full 3-ball game, and
+-- confirmed by the RAM snapshots).  Still read-only on the CPU bus -- no gameplay
+-- effect -- and still fed to sound_link, which emits 0xA0|value on change.
+-- `ball_val` is now ALSO the auto-restart game-over detector (see AUTO_RESTART).
+BALL_SNOOP: process(clk_50) begin
+  if rising_edge(clk_50) then
+    if U4_RAM_cs = '1' and cpu_wr_n = '0' and cpu_addr(6 downto 0) = "1110010" then
+      ball_val <= cpu_dout(3 downto 0);
+    end if;
+  end if;
+end process;
+
 U4_IO: entity work.R6532  -- Switchmatrx
 port map(
 	phi2   => phi2,
@@ -806,7 +1442,10 @@ port map(
    din	 => cpu_dout,
 	dout	 => U4_IO_dout,
 		
-	pa_in	 => U4_pa_in or SW_Freeplay,
+	-- sw_inject = auto-restart synthetic coin/credit closures (see TIME-ATTACK block).
+	-- ORed here, one stage AFTER U4_pa_in, so the FPGA's own detect_sw* blocks cannot
+	-- see our injected press -> no feedback into sim_coin / the NVRAM credit trigger.
+	pa_in	 => U4_pa_in or SW_Freeplay or sw_inject,
    pa_out => open,
    pb_in  => "00000000",
 	pb_out => u4_pb_cpu
@@ -832,7 +1471,9 @@ port map(
    din	 => cpu_dout,
 	dout	 => U5_IO_dout,
 			
-	pa_in	 => slam & "0000000",
+	-- slam_to_cpu = slam XOR kill_pulse (END-ON-DEMAND); identical to `slam` while
+	-- game_kill='0', so this build behaves exactly as before.
+	pa_in	 => slam_to_cpu & "0000000",
    pa_out => U5_pa_out,
    pb_in  => "00000000",
 	pb_out => U5_pb_out
@@ -945,6 +1586,7 @@ port map(
 );
 
 
+GEN_FPGA_SND : if not esp_sound generate
 SOUNDBOARD: entity work.gosof80
 port map(
 		clk_50	=> clk_50,
@@ -961,6 +1603,10 @@ port map(
 		Sound_Meta(2) => Sound_S4,
 		Sound_Meta(3) => Sound_S8,
 		Sound_Meta(4) => Sound_S16,
+		-- lisyctrl direct sound inject (diag mode)
+		lisy_active => lisy_active,
+		lisy_sound  => lisy_sound5,
+		lisy_trig   => lisy_sound_trig,
 		
 		--Soundboard Options S1 DIPs 1..6
 		SB_Opt => sb_option(1) & sb_option(2) & sb_option,
@@ -970,7 +1616,7 @@ port map(
 		--option   => sb_option,
 		
 		-- DFPlayer
-		DFP_tx	=> Audio_RX,
+		DFP_tx	=> open,   -- PIN_2 repurposed as the display-inject RX
 		
 		--module
 		soundrom1_addr => soundrom1_addr,
@@ -978,7 +1624,85 @@ port map(
 		soundrom1_dout => soundrom1_dout,
 		soundrom2_dout => soundrom2_dout
 		
-	); 	
+	);
+end generate GEN_FPGA_SND;
+
+GEN_ESP_SND : if esp_sound generate
+-- ESP/GOSOWAV is the sound source: GOSOF80 + DFPlayer dropped. A single UART on the
+-- Debug pin (PIN_11 / K2, right next to the FPGA) carries the diag-mode token + the
+-- live sound# + game# to the ESP (diag and gameplay sound never overlap). The audio
+-- pins Audio_RX (PIN_2) and Sound (PIN_7) are freed -> tie them off.
+-- Shadow the whole RIOT scratch RAM *and* the 5101 CMOS RAM, and stream both to
+-- the ESP once a second.  Read-only snoop: no gameplay effect, nothing is driven
+-- back onto the CPU bus.
+--   RIOT: the three chip selects decode cpu_addr(13 downto 7), which pins both
+--   a(8) and a(7), so cpu_addr(8 downto 0) is already the wire-format index with
+--   no remapping: U4 ($0000-$007F) -> 0..127, U5 ($0080-$00FF) -> 128..255,
+--   U6 ($0100-$017F) -> 256..383.  Prefixed with '0' -> shadow 0..511.
+--   5101: r5101_cs covers $1800-$1FFF, Z5 latches cpu_addr(7 downto 0) with only
+--   cpu_dout(3 downto 0) (Gottlieb uses the low nibble), so mirror
+--   "0000" & cpu_dout(3 downto 0) at shadow "10" & cpu_addr(7 downto 0) -> 512..767.
+-- The two selects are mutually exclusive by construction (RIOT needs
+-- cpu_addr(13 downto 11)="000", the 5101 needs "011"), so the mux below can never
+-- drop a write; the RIOT branch takes priority only as a defensive default.
+snap_riot_wr <= (U4_RAM_cs or U5_RAM_cs or U6_RAM_cs) and not cpu_wr_n;
+snap_5101_wr <= r5101_cs and not cpu_wr_n;
+snap_wr_en   <= snap_riot_wr or snap_5101_wr;
+snap_wr_addr <= '0' & cpu_addr(8 downto 0) when snap_riot_wr = '1'
+                else "10" & cpu_addr(7 downto 0);
+snap_wr_data <= cpu_dout when snap_riot_wr = '1'
+                else "0000" & cpu_dout(3 downto 0);
+
+RAM_SNAP : entity work.ram_snoop
+generic map( clk_hz => 50000000, period_ms => 1000, n_bytes => 640 )
+port map(
+	clk => clk_50, rst => not reset_l,
+	wr_addr => snap_wr_addr,
+	wr_data => snap_wr_data,
+	wr_en   => snap_wr_en,
+	snap_data => snap_data_s,
+	snap_req  => snap_req_s,
+	snap_ack  => snap_ack_s
+);
+
+SND_LINK : entity work.sound_link
+port map(
+	clk => clk_50, rst => not reset_l,
+	diag => lisy_active,
+	sound => Sound_S16 & Sound_S8 & Sound_S4 & Sound_S2 & Sound_S1,
+	game => game_select,
+	game_running => game_running,                     -- tournament auto-timer (0xF2/0xF3 to ESP)
+	ball => ball_val,                                 -- ball-in-play telemetry (0xA0|ball)
+	-- ESP -> FPGA link telemetry: is disp_inject hearing the ESP at all?
+	dinj => dinj_valid & dinj_ctrl(2 downto 0),       -- 0xE0 | {dvalid, kill, overlay, autorestart}
+	rxc  => dinj_rxc,                                 -- 0xB0 | deframed-byte count (0xB0..0xBE)
+	snap_data => snap_data_s,                         -- RAM snapshot frame (0xBF + 1280 nibble bytes)
+	snap_req  => snap_req_s,
+	snap_ack  => snap_ack_s,
+	tx => sl_tx
+);
+Debug    <= sl_tx;
+-- Audio_RX/PIN_2 is now an INPUT (ESP GPIO9 display-inject UART TX is wired to it).
+Sound    <= '0';
+end generate GEN_ESP_SND;
+
+-- HYBRID build: GOSOF80 stays the sound source (GEN_FPGA_SND drives Sound/PIN_7 + the unused
+-- DFP_tx/PIN_2), and the sound_link UART feeds the ESP on the Debug pin so it can play the
+-- speech + complex-80B that GOSOF80 can't. Only the Debug pin is driven here (the audio pins
+-- belong to GOSOF80). `and not esp_sound` guards against a both-true misconfig (no double Debug).
+GEN_HYB_LINK : if hybrid and not esp_sound generate
+SND_LINK_H : entity work.sound_link
+port map(
+	clk => clk_50, rst => not reset_l,
+	diag => lisy_active,
+	sound => Sound_S16 & Sound_S8 & Sound_S4 & Sound_S2 & Sound_S1,
+	game => game_select,
+	game_running => game_running,                     -- tournament auto-timer (0xF2/0xF3 to ESP)
+	tx => sl_tx
+);
+Debug <= sl_tx;
+end generate GEN_HYB_LINK;
+ 	
 	
 	
 end rtl;

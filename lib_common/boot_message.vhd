@@ -48,11 +48,18 @@ USE ieee.std_logic_1164.all;
 		Din 	=> Din_Seg_B,
 		Dout  => bm_segments(9 to 16)
 	);	
+	-- BUG (fixed 2026-07-25): this third decoder drives the THIRD segment group,
+	-- bm_segments(17 to 24) -- the status / credit-ball digits, fed by Din_Seg_C
+	-- (see the process below: status_d is loaded into Din_Seg_C at counts 12000,
+	-- 13000, 14000 and 15000, and Din_Seg_C is set to ' ' for every other digit
+	-- strobe).  It was wired to Din_Seg_B, i.e. the player 3/4 data, so Din_Seg_C
+	-- was written but never read and the status digits showed a frozen copy of
+	-- display3/display4 instead.
 	sn7448_gtb_3: entity work.sn7448_gtb
-	port map(   
-		Din 	=> Din_Seg_B,
+	port map(
+		Din 	=> Din_Seg_C,
 		Dout  => bm_segments(17 to 24)
-	);	
+	);
 	
 	var_display4 <= display4 when SD_error = '0' else error_disp4; 
 	

@@ -41,7 +41,7 @@ set_global_assignment -name DEVICE 10CL006YE144C8G
 set_global_assignment -name TOP_LEVEL_ENTITY SYS80
 set_global_assignment -name ORIGINAL_QUARTUS_VERSION "13.0 SP1"
 set_global_assignment -name PROJECT_CREATION_TIME_DATE "17:45:57  APRIL 01, 2020"
-set_global_assignment -name LAST_QUARTUS_VERSION "22.1std.2 Lite Edition"
+set_global_assignment -name LAST_QUARTUS_VERSION "22.1std.0 Lite Edition"
 set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
 set_global_assignment -name MIN_CORE_JUNCTION_TEMP 0
 set_global_assignment -name MAX_CORE_JUNCTION_TEMP 85
@@ -157,11 +157,13 @@ set_global_assignment -name VHDL_FILE ../lib_common/T65/T65.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/SPI_Master.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/spi_slave.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/lisyctrl.vhd
+set_global_assignment -name VHDL_FILE ../lib_common/disp80b_diag.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/SN74175.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/SN7448_GTB.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/SN7448.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/slow_to_fast_clock_bus.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/slow_to_fast_clock.vhd
+set_global_assignment -name VHDL_FILE ../lib_common/nor_flash.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/SD_Card.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/read_the_dips.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/R6532.vhd
@@ -179,3 +181,17 @@ set_global_assignment -name QIP_FILE ../lib_cyclone_10/GAME_ROM.qip
 set_global_assignment -name SDC_FILE SYS80.sdc
 set_global_assignment -name VHDL_FILE SYS80.vhd
 set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_id Top
+set_global_assignment -name VHDL_FILE ../lib_common/sound_link.vhd
+set_global_assignment -name VHDL_FILE ../lib_common/ram_snoop.vhd
+set_global_assignment -name VHDL_FILE ../lib_common/tourney_countdown.vhd
+set_global_assignment -name VHDL_FILE ../lib_common/bin_to_bcd.vhd
+set_global_assignment -name VHDL_FILE ../lib_common/value_to_dispstr.vhd
+set_global_assignment -name VHDL_FILE ../lib_common/tourney_display_top.vhd
+set_global_assignment -name VHDL_FILE ../lib_common/tourney_block.vhd
+set_global_assignment -name VHDL_FILE ../lib_common/ay_3_8910.vhd
+set_global_assignment -name VHDL_FILE ../lib_common/disp_inject.vhd
+set_global_assignment -name VHDL_FILE ../lib_common/ta_overlay.vhd
+# Audio_RX (PIN_2) is the ESP -> FPGA control/display-inject UART RX.  The pull-up
+# parks the line idle-high when the ESP is unplugged or held in reset, so a floating
+# pin can never synthesise start bits and fake control frames.
+set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to Audio_RX
