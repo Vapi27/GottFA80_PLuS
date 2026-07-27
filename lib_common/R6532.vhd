@@ -52,7 +52,19 @@ entity  R6532 is
             pa_in  : in  std_logic_vector (7 downto 0) ; -- PORT A   entrees
             pa_out : out std_logic_vector (7 downto 0) ; -- PORT A   sorties
             pb_in  : in  std_logic_vector (7 downto 0) ; -- PORT B   entrees
-            pb_out : out std_logic_vector (7 downto 0)   -- PORT B   sorties
+            pb_out : out std_logic_vector (7 downto 0) ; -- PORT B   sorties
+
+            -- ORA WRITE STROBE (added 2026-07-27 for SOUND_WIRE).  '1' for exactly
+            -- the phi2-LOW half-cycle that follows a CPU write to ORA (register 0),
+            -- i.e. it is high precisely while pa_out carries the value that write
+            -- just produced -- pa_out is updated on the same falling_edge(phi2).
+            -- This is the hardware strobe PinMAME uses (gts80.c riot6532_2a_w runs
+            -- ONLY on a port-A write); without it a consumer of pa_out cannot tell
+            -- "the CPU wrote the port" from "some other latch in the system moved".
+            -- Purely additive: leave it unconnected (=> open) and it prunes away.
+            -- A 6502 needs >= 3 phi2 cycles between two stores, so consecutive ORA
+            -- writes always give separate pulses with a low phase in between.
+            pa_wr  : out std_logic := '0'
         );
 end entity;
 
@@ -74,8 +86,9 @@ architecture RTL of R6532 is
             signal s_irq_pa7            : std_logic                     ; -- Etat de l'interruption par PA7
             signal s_irq_pa7_en         : std_logic                     ; -- Autorisation interruption par PA7
             signal s_edge               : std_logic                     ; -- Detection front sur PA7 (0 negatif, 1 positif)
-            signal s_PA7                : std_logic                     ; -- Etat du PA7 memorise, pour detection front           
-            
+            signal s_PA7                : std_logic                     ; -- Etat du PA7 memorise, pour detection front
+            signal s_ora_wr             : std_logic := '0'              ; -- Ecriture dans ORA lors du dernier front montant de PHI2
+
 begin
 
     ------------------------------------------------------------------------
@@ -86,11 +99,13 @@ begin
     begin
     
         if (rising_edge(phi2)) then
-        
+
             ------------------------------------------------------------------------
             -- Tout le circuit fonctionne sur front montant du PHI2
             -- y compris la prise en compte du RESET
             ------------------------------------------------------------------------
+
+            s_ora_wr <= '0' ;                          -- defaut: pas d'ecriture ORA ce cycle
 
             if (rst_n = '0') then
             
@@ -182,7 +197,8 @@ begin
                                     ------------------------------
                                     -- 000 : Ecriture dans ORA  --
                                     ------------------------------
-                                    s_ora <= din ;
+                                    s_ora    <= din ;
+                                    s_ora_wr <= '1' ;   -- strobe d'ecriture ORA (voir port pa_wr)
                                 when "01" =>
                                     ------------------------------
                                     -- 001 : Ecriture dans DDRA --
@@ -347,6 +363,7 @@ begin
         if (falling_edge(phi2)) then
             pa_out <= ((s_ora and s_ddra) or (pa_in and not(s_ddra))) ; -- Sortie sur PORT A, uniquement pour les bits en sorties (a "1" dans DDRA) + copie des entrees
             pb_out <= ((s_orb and s_ddrb) or (pb_in and not(s_ddrb))) ; -- Sortie sur PORT B, uniquement pour les bits en sorties (a "1" dans DDRB) + copie des entrees
+            pa_wr  <= s_ora_wr ;                                        -- Meme front que pa_out => pa_wr='1' <=> pa_out porte la valeur qui vient d'etre ecrite
         end if ;
      
     end process ;

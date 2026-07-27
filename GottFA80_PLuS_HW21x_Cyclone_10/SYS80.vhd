@@ -334,7 +334,16 @@ signal 	Sound_S8			: std_logic;
 signal 	Sound_S16		: std_logic;
 signal 	Sound_S16_80	: std_logic;   -- 80/80A: lamp latch DS3, bit 1
 signal 	Sound_S16_80B	: std_logic;   -- 80B   : lamp latch DS2, bit 0
-	
+-- SOUND BUS EVENTS (SOUND_WIRE.md).  The 5-bit code above is combinational on the
+-- RIOT PA latch PLUS a lamp latch, so it moves for reasons that are not a sound
+-- command; these three signals are the strobe-qualified EVENT stream that the
+-- sound_link UART reports instead.  See lib_common/snd_bus.vhd.
+signal 	u6_pa_wr			: std_logic;   -- U6 RIOT: the CPU has just written ORA (port A)
+signal 	snd_sel			: std_logic;   -- '1' = a sound code is selected on the bus
+signal 	snd_stb			: std_logic;   -- one clk_50 pulse per sound-bus event
+signal 	snd_rel			: std_logic;   -- with snd_stb: '1' = the bus was RELEASED
+signal 	fam_code			: std_logic_vector(1 downto 0);  -- 00=80 01=80A 10=80B -> 0xF4|fam
+
 -- address decoding helper
 signal soundrom1_cs		: std_logic;
 signal soundrom2_cs		: std_logic;
@@ -1667,9 +1676,14 @@ port map(
 		
 	pa_in	 => "00000000",
    pa_out => U6_pa_out,
+	-- ORA write strobe: high for the phi2-low phase in which pa_out takes the
+	-- value the CPU just wrote.  This is the qualification PinMAME applies
+	-- (riot6532_2a_w runs only on a port-A write) and is what turns the
+	-- combinational sound vector into an EVENT -- see snd_bus.vhd below.
+   pa_wr  => u6_pa_wr,
    pb_in  => "00000000",
 	pb_out => U6_pb_out
- );  
+ );
 
 GAME: entity work.GAME_ROM -- Game ROM 2KByte
 port map(
@@ -1783,6 +1797,37 @@ port map(
 
 Sound_S16 <= Sound_S16_80B when is_80B = '1' else Sound_S16_80;
 
+---------------------
+-- SOUND BUS EVENTS -> the ESP (SOUND_WIRE.md)
+----------------------
+-- The five signals above are what the SOUND BOARD sees: a level, combinational
+-- on the RIOT port-A latch and on a lamp latch.  GOSOF80 consumes them as such
+-- and is untouched.  The sound_link UART, however, must report EVENTS -- what
+-- the 6502 actually put on the bus, in order, without coalescing -- so it is
+-- fed from snd_bus instead, which qualifies with the real port-A write strobe:
+--   * a LAMP write can no longer inject a phantom cue (S16 moving on its own
+--     is not an event);
+--   * a bus RELEASE becomes 0x30, not "command 0" -- or, when the S16 lamp bit
+--     happens to be latched high, not the phantom "command 16" that the Arena
+--     notes have been calling a constant background hum all along.
+-- `snd_sel` folds in the test button exactly as the sound vector does: with
+-- myTest asserted the vector is forced to code 3, i.e. a code IS selected.
+snd_sel <= (not U6_pa_out(4)) when myTest = '1' else '1';
+
+SND_BUS : entity work.snd_bus
+port map(
+	clk => clk_50, rst => not reset_l,
+	pa_wr => u6_pa_wr,
+	sel   => snd_sel,
+	stb   => snd_stb,
+	rel   => snd_rel
+);
+
+-- Machine family for the 0xF4|fam link token.  is_80B already carries the DIP
+-- S1-6 manual override, so it is tested first; the three flags are otherwise
+-- mutually exclusive by construction (gts_family.vhd).
+fam_code <= "10" when is_80B = '1' else "01" when is_80A = '1' else "00";
+
 
 GEN_FPGA_SND : if not esp_sound generate
 SOUNDBOARD: entity work.gosof80
@@ -1867,7 +1912,11 @@ SND_LINK : entity work.sound_link
 port map(
 	clk => clk_50, rst => not reset_l,
 	diag => lisy_active,
+	-- sound is now an EVENT stream: the code is sampled on snd_stb only.
 	sound => Sound_S16 & Sound_S8 & Sound_S4 & Sound_S2 & Sound_S1,
+	snd_stb => snd_stb,
+	snd_rel => snd_rel,
+	fam  => fam_code,                                 -- 0xF4 | fam (00=80 01=80A 10=80B)
 	-- FIXED 2026-07-27: this was RAW `game_select`, i.e. the INVERTED DIP value,
 	-- while every other consumer of the game number (nor_flash `selection`,
 	-- GOSOF80 `game_sel`, EEprom `selection`, and the boot banner via
@@ -1903,6 +1952,9 @@ port map(
 	clk => clk_50, rst => not reset_l,
 	diag => lisy_active,
 	sound => Sound_S16 & Sound_S8 & Sound_S4 & Sound_S2 & Sound_S1,
+	snd_stb => snd_stb,                               -- EVENT stream, see SND_LINK above
+	snd_rel => snd_rel,
+	fam  => fam_code,
 	game => gnum,                                     -- true game number, see SND_LINK above
 	game_running => game_running,                     -- tournament auto-timer (0xF2/0xF3 to ESP)
 	tx => sl_tx

@@ -22,4 +22,8 @@ echo "== gts_family (System 80/80A/80B family decode, all 64 game numbers) =="
 ghdl -a lib_common/gts_family.vhd sim/tb_gts_family.vhd
 ghdl -e tb_gts_family
 ghdl -r tb_gts_family --stop-time=1ms
+echo "== snd_wire (SOUND_WIRE contract: strobe qualification, FIFO, 0x30/0x31) =="
+ghdl -a lib_common/snd_bus.vhd lib_common/sound_link.vhd sim/sound_link_old.vhd sim/tb_snd_wire.vhd
+ghdl -e tb_snd_wire
+ghdl -r tb_snd_wire --stop-time=30ms
 echo "== ALL SIMS DONE =="

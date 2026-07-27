@@ -183,6 +183,7 @@ set_global_assignment -name SDC_FILE SYS80.sdc
 set_global_assignment -name VHDL_FILE SYS80.vhd
 set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_id Top
 set_global_assignment -name VHDL_FILE ../lib_common/sound_link.vhd
+set_global_assignment -name VHDL_FILE ../lib_common/snd_bus.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/ram_snoop.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/tourney_countdown.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/bin_to_bcd.vhd
