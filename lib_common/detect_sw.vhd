@@ -73,11 +73,25 @@ begin
 								state <= delay;
 							end if;								  
 					----------------------------------	
+					-- BUG FIX 2026-07-27: short_push was NEVER cleared here -- the line
+					-- "long_push <= '0'" was simply written twice.  Consequence: after the
+					-- first press of >=20ms the short_push output latched HIGH and stayed
+					-- high for the rest of the power cycle, because the only other place
+					-- short_push is written is the end of the `counting` state, which can
+					-- only ever re-assert it.  On the door test switch (detect_test_sw in
+					-- SYS80.vhd) short_push is `test_sw` -> EEprom w_trigger(2), and EEprom
+					-- saves the 5101 NVRAM on any CHANGE of w_trigger.  A latched-high
+					-- trigger bit produces exactly ONE edge per power-up, so "press the
+					-- door test switch to commit the settings" worked once and never
+					-- again -- which is precisely when an operator needs it (after
+					-- adjusting the book-keeping in the ROM test menu).
+					-- long_push (-> lisy_trig, diag entry) was already cleared correctly
+					-- and its timing is unchanged by this fix.
 					when delay =>
 						check_counter <= check_counter +1;
 						if (check_counter > 125000) then -- 100ms signals active							
-							long_push <= '0';
-							long_push <= '0';
+							long_push  <= '0';
+							short_push <= '0';
 							state <= Idle;				
 						end if;
 				end case;

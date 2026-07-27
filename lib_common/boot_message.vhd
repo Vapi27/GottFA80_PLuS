@@ -148,7 +148,16 @@ USE ieee.std_logic_1164.all;
 				when 15000 =>
 					Din_Seg_A <= display1(1);
 					Din_Seg_B <= display3(1);										
-					Din_Seg_C <= status_d(7);																											
+					-- BUG (fixed 2026-07-27): this wrote status_d(7) a SECOND time, so the
+					-- fourth status digit (strobe 15 = segment 40 in PinMAME's gts80.c map,
+					-- i.e. the LEFTMOST status digit) showed a copy of the rightmost one and
+					-- status_d(4) was never displayed at all.  The four status strobes
+					-- 12,13,14,15 carry chars 7,6,5,4.
+					-- No functional change in THIS design: SYS80.vhd passes a constant blank
+					-- status_d, so old and new expression are both ' '.  It matters because
+					-- sim/tb_ta_overlay.vhd now uses this table as the reference that
+					-- lib_common/ta_overlay.vhd must agree with.
+					Din_Seg_C <= status_d(4);																											
 					bm_digit_strobe <= x"F";						
 				when 16000 =>
 					count <= 0;

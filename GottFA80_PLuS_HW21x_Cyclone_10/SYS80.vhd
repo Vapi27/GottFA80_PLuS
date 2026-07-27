@@ -610,11 +610,24 @@ ta_dead  <= '0';
 -- proven reference, because its banner lands on the right displays on this very
 -- machine; reading its refresh cycle out gives, for group A:
 --     strobe 0,1,2,3,4,5  -> display1 chars 7,6,5,4,3,2   (player 1, units first)
---     strobe 15           -> display1 char 1              (7th digit, 80A glass)
+--     strobe 15           -> display1 char 1              (7th digit slot)
 --     strobe 6,7,8,9,A,B  -> display2 chars 7,6,5,4,3,2   (player 2, units first)
---     strobe 12           -> display2 char 1              (7th digit, 80A glass)
+--     strobe 12           -> display2 char 1              (7th digit slot)
 -- and the identical pattern on group B for display3 / display4.  Group C is
 -- written only at strobes 12..15 = the four status digits.
+--   CORRECTION 2026-07-27, and it only bites on 80A: the strobe-15 / strobe-12
+--   slots above are the SEVENTH digit of a 7-digit (80A) glass, and PinMAME's
+--   reorder[] table (src/wpc/gts80.c) puts that digit at the RIGHT-HAND, units
+--   end -- segment index 8 of the 2..8 run in dispNumeric3 -- not at the left.
+--   boot_message puts char 1 (the most significant) there, which is wrong for a
+--   7-digit glass but invisible on a 6-digit one, where nothing is wired to
+--   strobe 15 at all.  ta_overlay now takes `has7` and follows the hardware:
+--   6-digit -> strobes 15/12 are not ours; 7-digit -> strobe 15 is the units
+--   digit and strobes 0..5 shift up to tens..millions.  The status window was
+--   also reversed (it read 4,5,6,7 for strobes C..F where both references say
+--   7,6,5,4) and is fixed in the same change.  boot_message's own 7-digit
+--   mapping is left as it is: correcting it needs a family input threaded into
+--   the module, and it has never been exercised -- this machine is 6-digit.
 --   => THE PLAYER-2 DISPLAY IS SEGMENT GROUP A DURING STROBES 6..12, AND NOTHING
 --      ELSE ON THE GLASS IS.  Overriding group A only in that window therefore
 --      cannot touch player 1's score (strobes 0..5,15) nor the status display
@@ -663,6 +676,13 @@ port map(
 	clk    => clk_50,
 	strobe => U5_pa_out(3 downto 0),   -- the strobe the ROM is driving RIGHT NOW
 	sel    => ta_sel,
+	-- 80A = 7-digit score glass.  The 7th digit is the RIGHTMOST one and it is
+	-- addressed by strobe 15 (low window) / 12 (high window), so on 80A the whole
+	-- six-digit map shifts one place left; on 80 / 80B strobes 15 and 12 carry no
+	-- score digit at all and the overlay must keep its hands off them.  See the
+	-- WHICH DIGIT IS THE 7TH block in lib_common/ta_overlay.vhd for the two
+	-- independent references (boot_message + PinMAME gts80.c reorder[]).
+	has7   => has_7digit,
 	dstr   => ta_dstr,
 	hit_a  => ta_hit_a,
 	hit_b  => ta_hit_b,

@@ -14,10 +14,15 @@ echo "== integration (inout bus sharing) =="
 ghdl -a lib_common/spi_slave.vhd lib_common/lisyctrl.vhd sim/sys80_glue.vhd sim/tb_integration.vhd
 ghdl -e tb_integration
 ghdl -r tb_integration --stop-time=20ms
-echo "== ta_overlay (time-attack display injection strobe map) =="
-ghdl -a lib_common/SN7448_GTB.vhd lib_common/ta_overlay.vhd sim/tb_ta_overlay.vhd
+echo "== ta_overlay (strobe map, cross-checked against boot_message AND PinMAME) =="
+ghdl -a lib_common/SN7448_GTB.vhd lib_common/ta_overlay.vhd lib_common/boot_message.vhd sim/tb_ta_overlay.vhd
 ghdl -e tb_ta_overlay
-ghdl -r tb_ta_overlay --stop-time=1ms
+ghdl -r tb_ta_overlay --stop-time=200ms
+echo "== detect_sw (short_push / long_push pulse contract) =="
+# detect_sw.vhd uses std_logic_unsigned -> -fsynopsys is needed for -a, -e AND -r
+ghdl -a -fsynopsys lib_common/detect_sw.vhd sim/tb_detect_sw.vhd
+ghdl -e -fsynopsys tb_detect_sw
+ghdl -r -fsynopsys tb_detect_sw --stop-time=12sec
 echo "== gts_family (System 80/80A/80B family decode, all 64 game numbers) =="
 ghdl -a lib_common/gts_family.vhd sim/tb_gts_family.vhd
 ghdl -e tb_gts_family
