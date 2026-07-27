@@ -18,4 +18,8 @@ echo "== ta_overlay (time-attack display injection strobe map) =="
 ghdl -a lib_common/SN7448_GTB.vhd lib_common/ta_overlay.vhd sim/tb_ta_overlay.vhd
 ghdl -e tb_ta_overlay
 ghdl -r tb_ta_overlay --stop-time=1ms
+echo "== gts_family (System 80/80A/80B family decode, all 64 game numbers) =="
+ghdl -a lib_common/gts_family.vhd sim/tb_gts_family.vhd
+ghdl -e tb_gts_family
+ghdl -r tb_gts_family --stop-time=1ms
 echo "== ALL SIMS DONE =="

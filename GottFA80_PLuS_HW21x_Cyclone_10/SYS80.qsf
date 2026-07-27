@@ -142,6 +142,7 @@ set_location_assignment PIN_32 -to DIP_Strobe[3]
 set_location_assignment PIN_2 -to Audio_RX
 set_location_assignment PIN_7 -to Sound
 set_location_assignment PIN_11 -to Debug
+set_global_assignment -name VHDL_FILE ../lib_common/gts_family.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/uart_clk_gen.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/attract.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/dac.vhd

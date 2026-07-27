@@ -14,8 +14,37 @@
 --   1 0 1 1 c c c c   (0xB0 | rx_cnt)    -- disp_inject deframed-byte count [LEVEL]
 --                                           0xB0..0xBE ONLY, never 0xBF
 -- The snapshot bytes are supplied by ram_snoop through snap_data/snap_req/snap_ack.
--- The ranges (0x80..0x9F / 0x40..0x7F / 0xA0..0xAF / 0xF0..0xF1 / 0xF2..0xF3 /
--- 0xE0..0xEF / 0xB0..0xBE) never overlap.
+--
+-- ###########################################################################
+-- # THE COMPLETE BYTE MAP -- this comment is the single authority.  Anything #
+-- # added to this link must be allocated HERE first.                         #
+-- #                                                                          #
+-- #   0x00 .. 0x3F   FREE (64 codes, entirely unallocated)                    #
+-- #   0x40 .. 0x7F   game number   0x40 | game[5:0]        LEVEL              #
+-- #                  NOTE: the TRUE gamelist number (manual Appendix A),      #
+-- #                  i.e. `not game_select` in SYS80.vhd -- see the SND_LINK  #
+-- #                  port map there.                                         #
+-- #   0x80 .. 0x9F   sound command 0x80 | sound[4:0]       EVENT              #
+-- #   0xA0 .. 0xAF   ball in play  0xA0 | ball[3:0]        LEVEL              #
+-- #   0xB0 .. 0xBE   disp_inject deframed-byte count       LEVEL  (mod 15!)   #
+-- #   0xBF           RAM-snapshot frame marker             diagnostic         #
+-- #   0xC0 .. 0xCF   snapshot payload, high nibble         diagnostic         #
+-- #   0xD0 .. 0xDF   snapshot payload, low  nibble         diagnostic         #
+-- #   0xE0 .. 0xEF   disp_inject state 0xE0 | {dvalid,ctrl2,ctrl1,ctrl0}      #
+-- #                  LEVEL.  ALL SIXTEEN codes are used (dvalid=1 gives       #
+-- #                  0xE8..0xEF) -- 0xE8..0xEF is NOT free.                   #
+-- #   0xF0 .. 0xF1   diag mode      0xF0 | diag            LEVEL              #
+-- #   0xF2 .. 0xF3   game state     0xF2 | running         LEVEL              #
+-- #   0xF4 .. 0xFF   FREE (12 codes)                                          #
+-- #                                                                          #
+-- # Free space for new tokens: 0x00..0x3F and 0xF4..0xFF.  A family /         #
+-- # display-type report or a family-mismatch watchdog flag belongs in         #
+-- # 0xF4..0xF7 (0xF4 | fam[1:0]) with 0xF8..0xFF still spare; do NOT reach    #
+-- # into 0xE8..0xEF, which the disp_inject token already owns.                #
+-- ###########################################################################
+--
+-- ESP decode order matters: test the EXACT byte 0xBF before the (b & 0xF0) ==
+-- 0xB0 mask, and test the two 0xFx pairs before any coarser mask.
 --
 -- ---------------------------------------------------------------------------
 -- ESP -> FPGA LINK TELEMETRY (added 2026-07-27).

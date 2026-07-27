@@ -24,6 +24,9 @@ library ieee;
 use ieee.std_logic_1164.all;
 --use ieee.std_logic_unsigned.all;
 use IEEE.numeric_std.all;
+-- System 80 / 80A / 80B family decode from the DIP game number (lib_common).
+-- See the header of gts_family.vhd for the PinMAME cross-check of every range.
+use work.gts_family.all;
 
 entity SYS80 is
 	generic(
@@ -38,7 +41,35 @@ entity SYS80 is
 		-- HYBRID build (requires esp_sound=false): GOSOF80 synthesises the supported sounds AND
 		-- the sound_link UART feeds the ESP, which plays only speech + complex-80B (sndmode=hybrid
 		-- on the ESP, per sndroute). Off by default => stock/esp_sound builds are unchanged.
-		hybrid      : boolean := false
+		hybrid      : boolean := false;
+		-- ===================================================================
+		-- 80B DIAGNOSTIC TEXT DISPLAY (disp80b_diag) -- MEASURED COST, 2026-07-27.
+		--
+		-- disp80b_diag lets LISYcontrol paint 2x20 ASCII on an 80B alphanumeric
+		-- glass while the 6502 is held.  It is the ONLY consumer of lisyctrl's
+		-- 40-byte text buffer (o_txt, registers 0x50..0x77), so enabling it
+		-- costs BOTH modules:
+		--     disp80b_diag       328 LE /  63 registers
+		--     lisyctrl txt_b     ~247 LE / 320 registers
+		--     -----------------------------------------
+		--     total              ~575 LE / 383 registers   -> 366 LABs becomes
+		--                                                     392/392 = 100 %.
+		--
+		-- Until now this was DEAD CODE that nobody noticed: `not80B` was
+		-- hard-wired to '1', the segments_80B branch of the display mux was
+		-- unreachable, and Quartus quietly pruned the whole chain.  Making
+		-- not80B family-dependent woke it up and instantly filled the device.
+		--
+		-- So it is now an EXPLICIT switch, defaulting OFF -- which is exactly
+		-- the behaviour of every bitstream burned so far, i.e. no regression.
+		-- The 80B GAME display path (segments_80B driven by the CPU's own RIOT
+		-- writes) is unaffected and stays live for all three families; only the
+		-- diag-mode TEXT driver is left out.  Turn this on as part of the 80B
+		-- display back-end task, which will have to find the ~26 LABs first
+		-- (candidates: the ta_overlay/boot_message duplication, the 3 spare
+		-- SPI_Master copies inside EEprom).
+		-- ===================================================================
+		disp80b_diag_enable : boolean := false
 	);
 	port(
 	   -- the FPGA board
@@ -127,6 +158,7 @@ signal U4_irq_n			: std_logic;
 -- trigger
 signal game_over_relay			: std_logic;
 signal clk_Z1			: std_logic;
+signal clk_Z2			: std_logic;
 signal clk_Z3			: std_logic;
 signal test_sw			: std_logic;
 signal credit_sw			: std_logic;
@@ -224,9 +256,59 @@ signal sb_opt_dig1			:  character;
 
 -- dip games select and options
 signal readingdips	: 	std_logic:= '1';
-signal game_select 		:  std_logic_vector(5 downto 0);				
+signal game_select 		:  std_logic_vector(5 downto 0);
 signal game_option		: 	std_logic_vector(1 to 6);
 signal sb_option		: 	std_logic_vector(1 to 4);
+
+-- ===========================================================================
+-- SYSTEM 80 / 80A / 80B FAMILY DECODE  (2026-07-27)
+--
+-- gnum is the TRUE game number: game_select is INVERTED in this design (a
+-- closed DIP reads '0'), which is why every other consumer already applies
+-- `not game_select` -- nor_flash `selection`, GOSOF80 `game_sel`, the EEprom
+-- `selection`, and the boot banner via byte_to_ascii's internal `not mybyte`.
+--
+-- WHY THE FLAGS MAY BE USED BEFORE THE 6502 RUNS (checked in the source):
+-- read_the_dips only drops `readingdips` in its Idle state, i.e. after all
+-- four strobe/return reads have completed.  nor_flash is held in reset by
+-- `i_Rst_L => not readingdips`, loads the whole 16 KByte image, and only then
+-- asserts `cpu_reset_l` (-> reset_l -> cpu_res_n).  So the DIPs are complete
+-- long before the CPU fetches its reset vector, and a family bit derived from
+-- them is valid for the ROM decode and the display back-end from the first
+-- instruction onwards.
+--
+-- The flags are nevertheless REGISTERED on the falling edge of readingdips:
+-- read_the_dips loads game_select(3 downto 0) in Read1 and (5 downto 4) in
+-- Read2, so a purely combinational decode would glitch for one CPU clock
+-- while the number is half-updated.  Power-on values = System 80 (is_80='1',
+-- everything else '0'), i.e. exactly today's proven hard-wired behaviour, so
+-- nothing changes on the glass until the flags latch.
+--
+-- MANUAL OVERRIDE -- game_option(5)  ("S1 option switch 5", read by
+-- read_the_dips in state Read3 from returns(2), strobe "1011").
+-- VERIFIED UNUSED: a grep of SYS80.vhd + lib_common shows game_option(5) is
+-- referenced in exactly one place, the CONVO byte_to_ascii instance that
+-- paints the option digits on the boot banner.  Only (1)..(4) drive real
+-- options (freeplay / init nvram / slam fix open / slam fix close); (5) and
+-- (6) were display-only.  (6) is left free for the next family one-liner.
+-- ENCODING (same polarity as every other option: DIP CLOSED = '0' = active):
+--   game_option(5) = '1' (switch OPEN, factory default)  -> family from the
+--       game number, as decoded above.  Unchanged behaviour.
+--   game_option(5) = '0' (switch CLOSED)                 -> INVERT the 80B
+--       decision: an 80-family number is treated as 80B and vice versa.
+-- One bit cannot select among three families, so the override flips the only
+-- axis that actually changes hardware behaviour (numeric vs alphanumeric
+-- display back-end + the sound-S16 source).  It is the escape hatch for a
+-- mis-set game DIP, a machine with a swapped display, or a game number this
+-- table gets wrong -- "if the glass is the wrong type, close S1-5".
+-- ===========================================================================
+signal gnum				: std_logic_vector(5 downto 0);   -- TRUE game number = not game_select
+signal fam_ovr			: std_logic;                      -- '1' = invert the 80B decision
+signal rdips_d			: std_logic := '1';               -- readingdips delayed (falling-edge detect)
+signal is_80			: std_logic := '1';               -- power-up = System 80 (today's behaviour)
+signal is_80A			: std_logic := '0';
+signal is_80B			: std_logic := '0';               -- already includes the manual override
+signal has_7digit		: std_logic := '0';               -- 80A = 7-digit score displays
 		
 -- diff
 signal sim_coin		: 	std_logic:= '0';
@@ -250,6 +332,8 @@ signal 	Sound_S2			: std_logic;
 signal 	Sound_S4			: std_logic;
 signal 	Sound_S8			: std_logic;
 signal 	Sound_S16		: std_logic;
+signal 	Sound_S16_80	: std_logic;   -- 80/80A: lamp latch DS3, bit 1
+signal 	Sound_S16_80B	: std_logic;   -- 80B   : lamp latch DS2, bit 0
 	
 -- address decoding helper
 signal soundrom1_cs		: std_logic;
@@ -644,7 +728,25 @@ port map(
 	-- returns
 	returns => DIP_Return
 	);
-	
+
+----------------------
+-- System 80 / 80A / 80B family decode (see the signal block above)
+----------------------
+gnum    <= not game_select;          -- game_select is inverted; this is the real number
+fam_ovr <= not game_option(5);       -- DIP CLOSED ('0') = invert the 80B decision
+
+FAMILY: process(cpu_clk)
+begin
+	if rising_edge(cpu_clk) then
+		rdips_d <= readingdips;
+		if rdips_d = '1' and readingdips = '0' then   -- the DIP scan has just finished
+			is_80      <= f_is_80(gnum);
+			is_80A     <= f_is_80A(gnum);
+			is_80B     <= f_is_80B(gnum) xor fam_ovr;
+			has_7digit <= f_has_7digit(gnum);
+		end if;
+	end if;
+end process;
 
 CONVG: entity work.byte_to_ascii
 port map(
@@ -888,7 +990,16 @@ r5101_cs <= '1' when cpu_addr(13 downto 11) ="011" else '0';
 -- 0x3800-0x3FFF	"111" SYSTEM ROM
 system_rom_cs <= cpu_addr(13);
 -- late 80B games only when selected
-late80B <= '1' when game_select(5 downto 3) = "000" else '0'; --all games after Robo War (GAME SELECT IS NEGATED)
+-- FIXED 2026-07-27.  The old test was `game_select(5 downto 3) = "000"`, i.e.
+-- true game numbers 56..63 -- it wrongly included 62 (Amazon Hunt II) and the
+-- non-game 63, and mapping a bank that the ROM never asks for costs nothing but
+-- is still wrong.  PinMAME ground truth: the banked variant is
+-- GTS80B_4K_ROMSTART ("8K & 4K game PROM"), whose second 2K lands at
+-- $9000-$97FF -- exactly what game_rom2_cs below decodes.  In gts80games.c that
+-- macro is used by EXACTLY six parent sets: excaliba, badgirls, bighouse,
+-- hotshots, bonebstr, nmoves = gamelist 56..61.  Amazon Hunt II (62) uses
+-- GTS80B_8K_ROMSTART (one 8K PROM, no bank).  See lib_common/gts_family.vhd.
+late80B <= f_late_80B(gnum);   -- true game numbers 56..61
 game_rom2_cs	<= '1' when cpu_addr(13 downto 11) ="010" and cpu_addr(15) = '1' and late80B='1' else '0';
 
 
@@ -1200,11 +1311,24 @@ port map(
 U5_PB_7 <= not U5_pb_out(7); --switch enable
 
 -- determine if we have a 80B system -> no strobes on U5 PA0 .. PA3
--- COUNT_STROBES disabled (Pstore, dedicated System-80/Volcano build):
--- force System-80 numeric display. The 16-edge auto-detect on U5_pa_out(1)
--- was never validated on System 80 and left not80B='0' => 80B-format
--- segments on a numeric glass => black display.
-not80B <= '1';
+--
+-- HISTORY.  Upstream auto-detected the family by counting 16 edges on
+-- U5_pa_out(1) (COUNT_STROBES): if the strobes never moved the design latched
+-- "this must be 80B".  That is unsound in three separate ways -- it concludes
+-- 80B from the ABSENCE of evidence (a dead RIOT, a held CPU or a slow ROM boot
+-- all look like 80B), it is a ONE-WAY latch (it can never come back), and it
+-- powers up in the WRONG state (not80B='0' = 80B format) so a numeric glass is
+-- black for as long as the detector takes.  It was disabled for the
+-- System-80/Volcano build and replaced by the hard-wired `not80B <= '1'`,
+-- which of course made the bitstream System-80-only.
+--
+-- NOW: the family comes from the DIP game number (lib_common/gts_family.vhd),
+-- registered when the DIP scan finishes -- i.e. it is known BEFORE the 6502
+-- executes its first instruction, from positive evidence, and it is stable.
+-- For every System 80 and 80A number (0..39) is_80B='0' -> not80B='1', which
+-- is bit-identical to the hard-wired line it replaces, so the proven Volcano
+-- (game 12/13) behaviour is unchanged.
+not80B <= not is_80B;
 
 --------------------------------------------------
 -- 80B display routines	
@@ -1212,12 +1336,27 @@ not80B <= '1';
 -- 80B diag display: in diag the disp80b_diag FSM replaces the (held) 6502's
 -- RIOT lines so LISYcontrol can write the alphanumeric glass through the very
 -- same latch plumbing the game uses.
+-- Gated by the disp80b_diag_enable generic -- see the entity header for the
+-- measured cost (~575 LE / 383 registers, 366 -> 392/392 LABs).  OFF = the
+-- CPU's own RIOT lines always drive the 80B display path, which is what every
+-- bitstream burned so far did (the whole chain used to be pruned because
+-- not80B was hard-wired to '1').
+GEN_D80DIAG: if disp80b_diag_enable generate
 u5pa_disp4 <= d80_pa(4) when lisy_active = '1' else U5_pa_out(4);
 u5pa_disp5 <= d80_pa(5) when lisy_active = '1' else U5_pa_out(5);
 u5pb_disp  <= d80_pb    when lisy_active = '1' else U5_pb_out(6 downto 0);
 DISP80B: entity work.disp80b_diag
 port map( clk => clk_50, active => lisy_active, txt => lisy_txt,
           o_pa => d80_pa, o_pb => d80_pb );
+end generate GEN_D80DIAG;
+
+GEN_NO_D80DIAG: if not disp80b_diag_enable generate
+u5pa_disp4 <= U5_pa_out(4);
+u5pa_disp5 <= U5_pa_out(5);
+u5pb_disp  <= U5_pb_out(6 downto 0);
+d80_pa     <= (others => '0');
+d80_pb     <= (others => '0');
+end generate GEN_NO_D80DIAG;
 segments_80B(8) <= not u5pb_disp(4); --LD1
 segments_80B(16) <= not u5pb_disp(5); --LD2
 segments_80B(24) <= not u5pb_disp(6); --Reset
@@ -1255,6 +1394,11 @@ port map(
 -- (ta_full).  In the normal time-attack case (ta_part) the ROM keeps driving its
 -- own multiplex and TAOVL just replaces one segment group inside one strobe
 -- window -- see the TIME-ATTACK DISPLAY INJECTION block above.
+-- 80B note: PA(3 downto 0) still carries bm_digit_strobe before the CPU runs,
+-- exactly as upstream did.  That is harmless on 80B because the alphanumeric
+-- path is clocked by U5_pa_out(4)/(5) and U5_pb_out only -- PA(3 downto 0)
+-- cannot latch anything into it -- and with the 80B gate on disp_segments below
+-- the data lines no longer carry banner patterns either.
 U5_PA(3 downto 0) <= lisy_u5pa when (lisy_active='1' and not80B='1') else U5_pa_out(3 downto 0) when (game_running='1' and ta_full='0') else bm_digit_strobe;  -- only a FULL overlay steals the strobes
 
 -- merge the injected character into the ROM's own segment stream: exactly one
@@ -1266,9 +1410,31 @@ segments_inj(9 to 16)  <= ta_seg when (ta_part = '1' and ta_hit_b = '1') else se
 segments_inj(17 to 24) <= ta_seg when (ta_part = '1' and ta_hit_c = '1') else segments_80(17 to 24);
 
 -- assign display segments dependent on display type
+--
+-- 80B GATE, added 2026-07-27.  The bm_segments branch used to be tested BEFORE
+-- not80B, so on an 80B machine the numeric BCD boot banner (and the time-attack
+-- full-glass overlay, and the SD/NOR error banner) was pushed straight into the
+-- alphanumeric latch path: 24 lines of 7-segment patterns interpreted as 80B
+-- display data = garbage on the glass at every single power-up.  boot_message
+-- speaks 6-digit BCD only; there is no 80B banner engine yet (that is the
+-- separate 80B display back-end task).  So on 80B all three of those branches
+-- are simply suppressed and the mux falls through to segments_80B, which is the
+-- stock 80B path: while the CPU is in reset the two sn74175 latches are held
+-- cleared, no valid latch traffic reaches the display board, and the glass
+-- stays unwritten (blank) until the game ROM starts its own refresh.
+--
+-- ERROR BANNER ON 80B: the `SDcard_error = '0'` branch is the ROM-load failure
+-- banner.  In THIS build it is unreachable on every family -- the game image
+-- comes from lib_common/nor_flash.vhd, which hard-wires `SDcard_error <= '1'`
+-- and has no failure path (a bad NOR simply never releases cpu_reset_l).  If
+-- SD_Card.vhd is ever swapped back in, an 80B user would get a blank glass
+-- instead of the numeric error banner; the error is still reported on the
+-- LED_SDcard pin (LED_SDcard <= SDcard_error) and, in the ESP builds, the
+-- machine simply never leaves reset -- which is the same "no game" symptom the
+-- banner was there to explain.
 disp_segments <=
 	lisy_segments when (lisy_active = '1' and not80B = '1') else  -- numeric System-80 diag display test
-	bm_segments when ( ta_full = '1' ) or ( game_running = '0' and U5_pb_out(6) = '1') or SDcard_error = '0' else
+	bm_segments when not80B = '1' and (( ta_full = '1' ) or ( game_running = '0' and U5_pb_out(6) = '1') or SDcard_error = '0') else
 	segments_inj when not80B = '1' else   -- = segments_80, countdown merged in when ta_part='1'
    segments_80B;
 
@@ -1573,17 +1739,49 @@ Sound_S8 <= ((not u6_pa_out(3) and not u6_pa_out(4))) when mytest='1' else '0';
 ---------------------
 -- detection Sound16 (Q10)
 ----------------------
-clk_Z3 <= '1' when U6_pb_out(7 downto 4) = "0011" else '0'; --DS3
+-- Sound command bit 4 (S16) is NOT on the U6 PA sound nibble -- it is stolen
+-- from the LAMP latch, and 80/80A and 80B steal it from DIFFERENT places.
+-- PinMAME ground truth, src/wpc/gts80.c riot6532_2a_w:
+--
+--   if (soundBoard == SNDBRD_GTS80B)
+--        if (data&0x10) sndCmd((lampMatrix[0] & 0x10) | (data & 0x0f));
+--   else sndCmd(((lampMatrix[1] & 0x02) ? 0x10 : 0) | ((data&0x10) ? data&0x0f : 0));
+--
+-- and riot6532_2b_w maps the latch: `column = ((data & 0xf0)>>4) - 1`, even
+-- columns into the low nibble of lampMatrix[column/2], odd columns into the
+-- high nibble.  Unrolling both:
+--   80 / 80A : lampMatrix[1] & 0x02 = column 2, data bit 1
+--              column 2  <=> (pb>>4)-1 = 2 <=> pb(7 downto 4) = "0011" = DS3
+--              -> DS3, bit 1        (this is the latch that was already here)
+--   80B      : lampMatrix[0] & 0x10 = column 1 (HIGH nibble of [0]), data bit 0
+--              column 1  <=> (pb>>4)-1 = 1 <=> pb(7 downto 4) = "0010" = DS2
+--              -> DS2, bit 0        (this latch is new)
+-- Both latches always run; is_80B picks which one reaches Sound_Meta(4) and
+-- the sound_link 0x80|cmd token.  ~1 FF + a 4-bit compare; the unused bits of
+-- each sn74175 are left open and get pruned.
+clk_Z3 <= '1' when U6_pb_out(7 downto 4) = "0011" else '0'; --DS3 (80/80A)
+clk_Z2 <= '1' when U6_pb_out(7 downto 4) = "0010" else '0'; --DS2 (80B)
 
-sn74175_Sound16: entity work.sn74175 
-port map(   
+sn74175_Sound16: entity work.sn74175
+port map(
    Clock => clk_50,
 	clk => clk_Z3,
 	clear	=> '1',
 	D => U6_pb_out(3 downto 0),
 	--Q => open,
-	Q(1) => Sound_S16
+	Q(1) => Sound_S16_80
 );
+
+sn74175_Sound16B: entity work.sn74175
+port map(
+   Clock => clk_50,
+	clk => clk_Z2,
+	clear	=> '1',
+	D => U6_pb_out(3 downto 0),
+	Q(0) => Sound_S16_80B
+);
+
+Sound_S16 <= Sound_S16_80B when is_80B = '1' else Sound_S16_80;
 
 
 GEN_FPGA_SND : if not esp_sound generate
@@ -1670,7 +1868,16 @@ port map(
 	clk => clk_50, rst => not reset_l,
 	diag => lisy_active,
 	sound => Sound_S16 & Sound_S8 & Sound_S4 & Sound_S2 & Sound_S1,
-	game => game_select,
+	-- FIXED 2026-07-27: this was RAW `game_select`, i.e. the INVERTED DIP value,
+	-- while every other consumer of the game number (nor_flash `selection`,
+	-- GOSOF80 `game_sel`, EEprom `selection`, and the boot banner via
+	-- byte_to_ascii's internal `not mybyte`) applies `not game_select`.  The
+	-- 0x40|game token therefore named a different game than the ROM that was
+	-- actually loaded -- e.g. Volcano (12) was announced as 51 (Arena).  The ESP
+	-- expects the true gamelist index here: see gottfa-esp32/src/wavplayer.cpp
+	-- ("No = GottFA80_PLuS gamelist index (manual Appendix A), as sent on the
+	-- link (0x40|No)") and fpgalink.cpp's `(b & 0xC0) == 0x40` handler.
+	game => gnum,
 	game_running => game_running,                     -- tournament auto-timer (0xF2/0xF3 to ESP)
 	ball => ball_val,                                 -- ball-in-play telemetry (0xA0|ball)
 	-- ESP -> FPGA link telemetry: is disp_inject hearing the ESP at all?
@@ -1696,7 +1903,7 @@ port map(
 	clk => clk_50, rst => not reset_l,
 	diag => lisy_active,
 	sound => Sound_S16 & Sound_S8 & Sound_S4 & Sound_S2 & Sound_S1,
-	game => game_select,
+	game => gnum,                                     -- true game number, see SND_LINK above
 	game_running => game_running,                     -- tournament auto-timer (0xF2/0xF3 to ESP)
 	tx => sl_tx
 );
