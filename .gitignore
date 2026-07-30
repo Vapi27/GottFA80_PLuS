@@ -46,3 +46,16 @@ sim/work-obj*.cf
 *.orig
 sim/*/
 work-obj*.cf
+
+# Released artefacts.  build.sh writes <repo>/artifacts/<tag>/ : the bitstreams
+# (too large and binary for git) plus MANIFEST.txt and SHA256SUMS.  The
+# provenance is NOT lost by ignoring them -- the full manifest is stored in the
+# annotated release tag, so `git show fpga-v1.0.0` prints the sha256 of every
+# artefact together with the commit it was built from.
+artifacts/
+
+# Retired experiment leftovers, moved here during the v1 freeze (2026-07-30):
+# the ad-hoc per-experiment build_*.sh, their logs, the *.bak_* source copies,
+# and the ~25 pre-v1 bitstreams that were built by hand and have no manifest.
+# Nothing is deleted -- git holds the source history, this holds the rest.
+attic_experiments/

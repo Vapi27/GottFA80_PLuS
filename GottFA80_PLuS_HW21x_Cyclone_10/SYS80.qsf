@@ -165,7 +165,7 @@ set_global_assignment -name VHDL_FILE ../lib_common/SN7448.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/slow_to_fast_clock_bus.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/slow_to_fast_clock.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/nor_flash.vhd
-set_global_assignment -name VHDL_FILE ../lib_common/SD_Card.vhd
+#set_global_assignment -name VHDL_FILE ../lib_common/SD_Card.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/read_the_dips.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/R6532.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/detect_sw_trigger.vhd
@@ -185,15 +185,39 @@ set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_
 set_global_assignment -name VHDL_FILE ../lib_common/sound_link.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/snd_bus.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/ram_snoop.vhd
-set_global_assignment -name VHDL_FILE ../lib_common/tourney_countdown.vhd
-set_global_assignment -name VHDL_FILE ../lib_common/bin_to_bcd.vhd
-set_global_assignment -name VHDL_FILE ../lib_common/value_to_dispstr.vhd
-set_global_assignment -name VHDL_FILE ../lib_common/tourney_display_top.vhd
+#set_global_assignment -name VHDL_FILE ../lib_common/tourney_countdown.vhd
+#set_global_assignment -name VHDL_FILE ../lib_common/bin_to_bcd.vhd
+#set_global_assignment -name VHDL_FILE ../lib_common/value_to_dispstr.vhd
+#set_global_assignment -name VHDL_FILE ../lib_common/tourney_display_top.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/tourney_block.vhd
-set_global_assignment -name VHDL_FILE ../lib_common/ay_3_8910.vhd
+#set_global_assignment -name VHDL_FILE ../lib_common/ay_3_8910.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/disp_inject.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/ta_overlay.vhd
 # Audio_RX (PIN_2) is the ESP -> FPGA control/display-inject UART RX.  The pull-up
 # parks the line idle-high when the ESP is unplugged or held in reset, so a floating
 # pin can never synthesise start bits and fake control frames.
 set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to Audio_RX
+
+# ---------------------------------------------------------------------------
+# NOT COMPILED IN v1 (2026-07-30 audit).  Each entity below is present in
+# lib_common/ but is instantiated by NOTHING in the elaborated design, so
+# Quartus already pruned it -- commenting the line out changes no logic, it
+# only stops the QSF from claiming the module is part of the bitstream.
+# Uncomment the matching line the moment you re-instantiate the module.
+#
+#   ay_3_8910           AY-3-8910 core.  The [AY FIT TEST] keep-alive that used
+#                       to hold it in the netlist was dropped 2026-07-09.
+#   tourney_display_top \
+#   tourney_countdown    > the FPGA-side countdown chain.  Superseded: the ESP
+#   value_to_dispstr     | now formats the 7 characters and streams them over
+#   bin_to_bcd          /  the one-wire UART into disp_inject/ta_overlay.
+#   SD_Card             the original microSD ROM loader.  Replaced by
+#                       lib_common/nor_flash.vhd (SPI NOR), which is what the
+#                       SD_CARD instance in SYS80.vhd actually instantiates.
+#                       See the ERROR BANNER ON 80B note in SYS80.vhd before
+#                       swapping this back in.
+#
+# STILL COMPILED and genuinely used, despite similar names: tourney_block
+# (instance TBLOCK, currently a no-op with BLOCK_CODE = NOOP_CODE) and
+# disp80b_diag (behind the disp80b_diag_enable generic, default false).
+# ---------------------------------------------------------------------------

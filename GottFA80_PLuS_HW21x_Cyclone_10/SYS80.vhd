@@ -123,7 +123,6 @@ architecture rtl of SYS80 is
 signal cpu_clk		: std_logic; -- 895 kHz CPU clock
 signal reset_l	 	: std_logic := '0';
 signal reset_sw_stable	:	std_logic; 
-signal Counter : integer range 0 to 15 := 0;
 
 -- CPU 6502
 signal cpu_addr		: std_logic_vector(15 downto 0);
@@ -182,15 +181,16 @@ signal Din_Seg_A			: std_logic_vector(3 downto 0);
 signal Din_Seg_B			: std_logic_vector(3 downto 0);	
 signal Din_Seg_C			: std_logic_vector(3 downto 0);	
 signal bm_digit_strobe	: std_logic_vector(3 downto 0);
--- Tournament time-attack display injection (Pstore) -- OFF until tournament_mode='1' (no change)
-signal tournament_mode	: std_logic := '0';   -- TODO: drive from lisyctrl/DIP; '0' = stock behaviour
+-- Tournament time-attack display injection (Pstore) -- OFF until tournament_mode='1' (no change).
+-- Driven by lisyctrl's o_tournament (see the LISY_CTRL port map); powers up '0'
+-- and, with lisy_enable=false, stays '0' -- i.e. stock behaviour either way.
+-- Its only consumer is TBLOCK (tourney_block), which is a no-op placeholder
+-- today: BLOCK_CODE = NOOP_CODE = "1111", so nothing is actually masked.
+signal tournament_mode	: std_logic := '0';
 signal ta_arm			: std_logic;
 signal ta_dstr			: string(1 to 7);
-signal ta_value			: unsigned(23 downto 0);
-signal ta_dead			: std_logic;
 signal bm_disp1			: string(1 to 7);
 signal bm_show			: std_logic;
-signal ta_rst			: std_logic;            -- = not reset_l (active-high reset for tourney_display_top)
 signal u6pa_masked		: std_logic_vector(7 downto 0);
 -- ---------------------------------------------------------------------------
 -- TIME-ATTACK OVERLAY v3 (2026-07-27): paint the countdown on an UNUSED display
@@ -391,9 +391,15 @@ signal snap_wr_data    : std_logic_vector(7 downto 0);  -- mirrored data byte
 signal snap_data_s     : std_logic_vector(7 downto 0);  -- byte offered to sound_link
 signal snap_req_s      : std_logic;
 signal snap_ack_s      : std_logic;
-signal ta_cfg_start    : std_logic_vector(23 downto 0); -- lisyctrl TA_START -> tourney countdown (0 => generic)
-signal ta_cfg_decay    : std_logic_vector(23 downto 0); -- lisyctrl TA_DECAY -> tourney countdown (0 => generic)
-signal ay_audio        : std_logic_vector(9 downto 0);  -- [AY FIT TEST] AY core output (kept via LED_ON)
+-- lisyctrl registers TA_START / TA_DECAY.  NOT consumed on the FPGA side any
+-- more: the countdown moved to the ESP when the tourney_display_top chain was
+-- dropped, so these two only reach an unread signal and Quartus prunes them.
+-- Deliberately left wired rather than tied to `open`: they are part of the
+-- lisyctrl register map the ESP already writes, and rewiring a port of a
+-- hardware-proven module to save nothing is not worth the risk.  Re-point them
+-- at whatever consumes the start/decay values next.
+signal ta_cfg_start    : std_logic_vector(23 downto 0);
+signal ta_cfg_decay    : std_logic_vector(23 downto 0);
 
 -- ===========================================================================
 -- ESP -> FPGA CONTROL LINK (disp_inject).  One wire, ESP GPIO9 -> Audio_RX /
@@ -557,9 +563,14 @@ begin
 -- Revert with:  LED_Int <= not game_running;
 LED_Int <= in_attract;
 LED_SDcard <= SDcard_error;
--- [AY FIT TEST] keep-alive: reduce the AY audio output into LED_ON so synthesis can't prune the core
-LED_ON <= ay_audio(0) xor ay_audio(1) xor ay_audio(2) xor ay_audio(3) xor ay_audio(4)
-        xor ay_audio(5) xor ay_audio(6) xor ay_audio(7) xor ay_audio(8) xor ay_audio(9);
+-- LED_ON: '0' exactly as upstream (GottFA80_PLuS Cyclone IV, `LED_ON <= '0'; --RTH`).
+-- 2026-07-30: this pin used to be driven by an XOR-reduction of `ay_audio`, a
+-- keep-alive for the AY-3-8910 fit experiment.  The experiment was dropped on
+-- 2026-07-09 and `ay_audio` has been tied to all-zeros ever since, so the XOR
+-- chain evaluated to a constant '0' -- identical behaviour, stated indirectly.
+-- Both the vector and the chain are gone; lib_common/ay_3_8910.vhd is kept in
+-- the tree for the real AY integration.
+LED_ON <= '0';
 
 
 ----------------------
@@ -575,7 +586,6 @@ opt_slam_fix_close		<= not game_option(4);
 -- boot message
 ----------------------
 -- Tournament time-attack: countdown subsystem -> shows on display1 during a time-attack game (Pstore)
-ta_rst <= not reset_l;
 -- [AY FIT TEST] TADISP (tournament display chain ~463 LE) DROPPED to free room.
 -- 2026-07-25: the overlay is back, but the countdown now lives on the ESP -- it
 -- formats the 7 characters itself and streams them over the one-wire UART, which
@@ -586,8 +596,6 @@ ta_rst <= not reset_l;
 -- the game by itself even if ctrl(1) were somehow stuck high.
 ta_arm   <= dinj_ctrl(1) and dinj_valid;
 ta_dstr  <= dinj_str;
-ta_value <= (others => '0');
-ta_dead  <= '0';
 -- ===========================================================================
 -- TIME-ATTACK DISPLAY INJECTION -- v3, 2026-07-27.
 --
@@ -691,8 +699,8 @@ port map(
 	);
 -- [AY FIT TEST] dropped 2026-07-09: freed ~2 LABs for the disp80b_diag FSM
 -- (design hit 394/392 LABs). It was a fit-headroom placeholder only (output
--- went to LED_ON). Re-instantiate when the real AY integration lands.
-ay_audio <= (others => '0');
+-- went to LED_ON, which is now simply '0').  lib_common/ay_3_8910.vhd is still
+-- in the tree; re-instantiate it when the real AY integration lands.
 -- boot_message paints the WHOLE glass in one refresh cycle: display1/display2 are
 -- the two halves of segment group A (player 1 / player 2), display3/display4 the
 -- two halves of group B (player 3 / player 4), status_d is group C.  So when the
