@@ -126,6 +126,7 @@ signal reset_sw_stable	:	std_logic;
 
 -- CPU 6502
 signal cpu_addr		: std_logic_vector(15 downto 0);
+-- cpu_addr = les 16 bits utiles du port A du T65 (24 bits, reste inutilise)
 signal cpu_din			: std_logic_vector(7 downto 0);
 signal cpu_dout		: std_logic_vector(7 downto 0);
 signal cpu_wr_n		: std_logic := '1';
@@ -156,6 +157,13 @@ signal U4_irq_n			: std_logic;
 
 -- trigger
 signal game_over_relay			: std_logic;
+signal game_over_relay_v : std_logic_vector(3 downto 0);   -- port entier, cf. portabilite XST
+-- PORTABILITE XST : Quartus tolere qu on associe une PARTIE des bits d un port
+-- vectoriel, XST le REFUSE (ERROR:HDLCompiler:1346).  On associe donc le port
+-- entier a un signal, et on en extrait le ou les bits utiles juste apres.
+signal cpu_addr_full : std_logic_vector(23 downto 0);
+signal q_snd80_v     : std_logic_vector(3 downto 0);
+signal q_snd80b_v    : std_logic_vector(3 downto 0);
 signal clk_Z1			: std_logic;
 signal clk_Z2			: std_logic;
 signal clk_Z3			: std_logic;
@@ -374,6 +382,8 @@ signal lisy_u4pb, lisy_u6pa, lisy_u6pb : std_logic_vector(7 downto 0);
 signal u6pa_src, u6pb_src, u4_pb_cpu   : std_logic_vector(7 downto 0);
 signal sd_cs_n, ee_cs_n, cpu_res_n     : std_logic;
 signal lisy_trig : std_logic;   -- long-press of the Gottlieb door test switch
+signal dinj_ctrl2 : std_logic_vector(6 downto 0);  -- CONTROL2 0xFD flags from the ESP
+signal lisy_by_esp : std_logic := '0';             -- diag mode was entered by the ESP, not by the door switch
 signal lisy_sound5     : std_logic_vector(4 downto 0);  -- lisyctrl sound code -> gosof80
 signal lisy_sound_trig : std_logic;                     -- lisyctrl sound trigger -> gosof80
 signal sl_tx           : std_logic;                     -- sound_link UART (ESP sound mode)
@@ -551,6 +561,7 @@ constant AR_TRIES_MAX  : natural := 2;                  -- => 3 attempts total, 
 constant AR_INJECT_COIN : std_logic := '1';
 
 begin
+cpu_addr <= cpu_addr_full(15 downto 0);
 
 -- LEDs GottFA80
 -- [AUTO-RESTART DIAG] LED_Int used to show `not game_running`, which is useless:
@@ -857,16 +868,30 @@ TBLOCK: entity work.tourney_block
 	port map ( port_in => u6pa_src, sol_active => '1', tournament_mode => tournament_mode, port_out => u6pa_masked );
 u6pb_src  <= lisy_u6pb when lisy_active = '1' else U6_pb_out;
 U4_PB     <= lisy_u4pb when lisy_active = '1' else u4_pb_cpu;
--- mode entry: a LONG-PRESS of the Gottlieb door test switch enters diag mode;
--- any reset/reboot (reset_l='0') exits it. (lisy_trig = detect_test_sw long_push,
--- which is active from attract/idle -- the usual place to run diagnostics.)
+-- mode entry, two independent ways in:
+--   1. a LONG-PRESS of the Gottlieb door test switch (lisy_trig) -- STICKY, exactly
+--      as before: only a reset/reboot leaves diag mode.  Unchanged contract.
+--   2. the ESP raising CONTROL2 bit0 (dinj_ctrl2(0)) -- a LEVEL, so LISY CONNECT
+--      enters and DISCONNECT leaves, and disp_inject's own 5 s fail-safe drops it
+--      if the ESP dies.  A hung ESP can therefore never strand the machine with a
+--      frozen CPU.
+-- lisy_by_esp remembers which door was used, so an ESP that goes quiet cannot
+-- cancel a diag session the operator started at the door switch.
 GEN_LISY: if lisy_enable generate
 LISY_MODE: process begin
 	wait until rising_edge(clk_50);
 	if reset_l = '0' then
 		lisy_active <= '0';
+		lisy_by_esp <= '0';
 	elsif lisy_trig = '1' then
 		lisy_active <= '1';
+		lisy_by_esp <= '0';
+	elsif dinj_ctrl2(0) = '1' then
+		lisy_active <= '1';
+		lisy_by_esp <= '1';
+	elsif lisy_by_esp = '1' then
+		lisy_active <= '0';
+		lisy_by_esp <= '0';
 	end if;
 end process;
 LISY_CTRL: entity work.lisyctrl
@@ -921,15 +946,19 @@ port map(
 	clear	=> '1',
 	D => U6_pb_out(3 downto 0),
 	Q => open,
-	Qn(0) => game_over_relay
+	-- PORTABILITE (2026-08-13) : associer le port ENTIER.  N associer que
+	-- Qn(0) est accepte par Quartus mais REFUSE par XST (Xilinx) :
+	--   ERROR:HDLCompiler:1346 - Not all partial formals of qn have actual
+	-- Comportement identique : on n utilise toujours que le bit 0.
+	Qn => game_over_relay_v
 );
+game_over_relay <= game_over_relay_v(0);
 
  
 ---------------------
 -- SD card stuff
 ----------------------
-SD_CARD: entity work.nor_flash
-generic map( spi_hz => 2000000 )   -- ESP proved reads at 1-2 MHz through the 270R bus; raise later
+SD_CARD: entity work.SD_Card
 port map(
 	--no_of_sectors => x"20", -- 32 sectors per rom
 	--
@@ -1090,7 +1119,8 @@ generic map (
 	clk_hz     => 50000000,
 	baud       => 115200,
 	hold_ms    => 1000,     -- display overlay expires 1 s after the last 0xFF frame
-	ctrl_to_ms => 2000      -- fail-safe: ctrl b0/b1 cleared after 2 s of ESP silence
+	ctrl_to_ms => 2000,     -- fail-safe: ctrl b0/b1 cleared after 2 s of ESP silence
+	ctrl2_to_ms => 5000     -- fail-safe: diag mode released after 5 s of ESP silence
 )
 port map (
 	clk            => clk_50,
@@ -1099,6 +1129,7 @@ port map (
 	dstr           => dinj_str,
 	dvalid         => dinj_valid,
 	ctrl           => dinj_ctrl,
+	ctrl2          => dinj_ctrl2,
 	kill_pulse_req => dinj_kill,
 	rx_cnt         => dinj_rxc          -- telemetry: bytes deframed on PIN_2 (mod 15)
 );
@@ -1556,7 +1587,7 @@ port map(
 	NMI_n   			=> '1',
 	SO_n    			=> '1',
 	R_W_n 			=> cpu_wr_n,
-	A(15 downto 0)	=> cpu_addr,       
+	A			=> cpu_addr_full,        -- port ENTIER (24 bits), cf. portabilite XST       
 	DI     			=> cpu_din,
 	DO    			=> cpu_dout
 	);
@@ -1810,9 +1841,9 @@ port map(
 	clk => clk_Z3,
 	clear	=> '1',
 	D => U6_pb_out(3 downto 0),
-	--Q => open,
-	Q(1) => Sound_S16_80
+	Q => q_snd80_v                  -- port ENTIER, cf. portabilite XST
 );
+Sound_S16_80 <= q_snd80_v(1);
 
 sn74175_Sound16B: entity work.sn74175
 port map(
@@ -1820,8 +1851,9 @@ port map(
 	clk => clk_Z2,
 	clear	=> '1',
 	D => U6_pb_out(3 downto 0),
-	Q(0) => Sound_S16_80B
+	Q => q_snd80b_v                 -- port ENTIER, cf. portabilite XST
 );
+Sound_S16_80B <= q_snd80b_v(0);
 
 Sound_S16 <= Sound_S16_80B when is_80B = '1' else Sound_S16_80;
 

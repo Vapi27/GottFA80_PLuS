@@ -41,7 +41,7 @@ set_global_assignment -name DEVICE 10CL006YE144C8G
 set_global_assignment -name TOP_LEVEL_ENTITY SYS80
 set_global_assignment -name ORIGINAL_QUARTUS_VERSION "13.0 SP1"
 set_global_assignment -name PROJECT_CREATION_TIME_DATE "17:45:57  APRIL 01, 2020"
-set_global_assignment -name LAST_QUARTUS_VERSION "22.1std.0 Lite Edition"
+set_global_assignment -name LAST_QUARTUS_VERSION "22.1std.2 Lite Edition"
 set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
 set_global_assignment -name MIN_CORE_JUNCTION_TEMP 0
 set_global_assignment -name MAX_CORE_JUNCTION_TEMP 85
@@ -164,8 +164,8 @@ set_global_assignment -name VHDL_FILE ../lib_common/SN7448_GTB.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/SN7448.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/slow_to_fast_clock_bus.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/slow_to_fast_clock.vhd
-set_global_assignment -name VHDL_FILE ../lib_common/nor_flash.vhd
-#set_global_assignment -name VHDL_FILE ../lib_common/SD_Card.vhd
+#set_global_assignment -name VHDL_FILE ../lib_common/nor_flash.vhd
+set_global_assignment -name VHDL_FILE ../lib_common/SD_Card.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/read_the_dips.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/R6532.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/detect_sw_trigger.vhd
@@ -174,11 +174,11 @@ set_global_assignment -name VHDL_FILE ../lib_common/cpu_clk_gen.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/count_to_zero.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/byte_to_ascii.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/boot_message.vhd
-set_global_assignment -name QIP_FILE ../lib_cyclone_10/SYSTEM_ROM.qip
+set_global_assignment -name VHDL_FILE ../lib_portable/SYSTEM_ROM.vhd
 set_global_assignment -name QIP_FILE ../lib_cyclone_10/SB_RAM.qip
-set_global_assignment -name QIP_FILE ../lib_cyclone_10/RIOT_RAM.qip
+set_global_assignment -name VHDL_FILE ../lib_portable/RIOT_RAM.vhd   # portable infere (spartan6-feasibility)
 set_global_assignment -name QIP_FILE ../lib_cyclone_10/R5101.qip
-set_global_assignment -name QIP_FILE ../lib_cyclone_10/GAME_ROM.qip
+set_global_assignment -name VHDL_FILE ../lib_portable/GAME_ROM.vhd
 set_global_assignment -name SDC_FILE SYS80.sdc
 set_global_assignment -name VHDL_FILE SYS80.vhd
 set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_id Top

@@ -4,10 +4,12 @@
 -- WIRE: ESP GPIO9 (TX) -> FPGA PIN_2 / Audio_RX.  One direction only; the return
 -- path (FPGA -> ESP) is the existing sound_link UART on the Debug pin (PIN_11).
 --
--- FRAMING.  Two frame types, told apart by the first byte, which is the ONLY byte
--- allowed to be >= 0xFE.  That invariant is what makes resynchronisation trivial:
--- 0xFF / 0xFE are never consumed as payload, so a marker seen at any point aborts
--- whatever frame was in flight and starts a new one.
+-- FRAMING.  Three frame types, told apart by the first byte, which is the ONLY
+-- byte allowed to be >= 0xFD.  That invariant is what makes resynchronisation
+-- trivial: 0xFF / 0xFE / 0xFD are never consumed as payload, so a marker seen at
+-- any point aborts whatever frame was in flight and starts a new one.  Every
+-- payload byte of every frame is bounded at 0x7E, so widening the marker range
+-- from 0xFE to 0xFD costs nothing and breaks no existing sender.
 --
 --   DISPLAY  0xFF, then 7 ASCII chars (0x20..0x7E), right-justified, space padded.
 --            -> dstr(1 to 7) + dvalid.  DOUBLE BUFFERED: a half-received frame is
@@ -31,6 +33,20 @@
 -- no timeout and is deliberately NOT cleared (clearing it would arm a spurious
 -- edge on the next frame).  The two fail-safes are independent and BOTH must fail
 -- for a stuck overlay: ctrl(1) times out at 2 s AND dvalid at 1 s.
+--
+--   CONTROL2 0xFD, then ONE flags byte constrained to 0x00..0x7D:
+--               bit0 = diag_req        (1 = REQUEST diagnostic mode, LEVEL)
+--               bits 1-6 reserved, send 0
+--            -> ctrl2(6 downto 0).
+--            Unlike CONTROL, bit0 is a LEVEL, not an edge: SYS80 enters diag mode
+--            while it is high and leaves when it drops.  That is what makes the
+--            LISY CONNECT / DISCONNECT pair work from the ESP alone, without the
+--            long-press on the door test switch.
+--            FAIL-SAFE: ctrl2 is cleared after ctrl2_to_ms (default 5 s) of ESP
+--            silence, so a crashed ESP cannot leave the CPU frozen in diag mode
+--            with the machine dead.  The window is longer than CONTROL's 2 s
+--            because dropping out of diag mid-operation is disruptive; the ESP is
+--            expected to repeat the frame every 500 ms like the CONTROL frame.
 --
 -- bit3 (kill_long) is an OPTIONAL, strictly backward-compatible extension: this
 -- module only reports it, SYS80 uses it to stretch the slam pulse.  Sending 0 --
@@ -57,7 +73,8 @@ entity disp_inject is
     clk_hz     : natural := 50000000;  -- clk frequency
     baud       : natural := 115200;    -- must match the ESP
     hold_ms    : natural := 1000;      -- dvalid drops this long after the last display frame
-    ctrl_to_ms : natural := 2000       -- fail-safe: clear ctrl(1 downto 0) after this silence
+    ctrl_to_ms : natural := 2000;      -- fail-safe: clear ctrl(1 downto 0) after this silence
+    ctrl2_to_ms : natural := 5000      -- fail-safe: clear ctrl2 after this silence
   );
   port (
     clk            : in  std_logic;
@@ -68,6 +85,7 @@ entity disp_inject is
     dvalid         : out std_logic;
     -- control flags
     ctrl           : out std_logic_vector(6 downto 0);
+    ctrl2          : out std_logic_vector(6 downto 0);  -- CONTROL2 0xFD flags (bit0 = diag_req)
     kill_pulse_req : out std_logic;                    -- 1 clk pulse on ctrl bit2 rising edge
     -- TELEMETRY (2026-07-27).  Free-running counter of every byte this receiver
     -- has successfully DEFRAMED (valid start bit + 8 data bits + a '1' stop bit),
@@ -102,13 +120,14 @@ architecture rtl of disp_inject is
   signal b_dat : std_logic_vector(7 downto 0) := (others => '0');
 
   -- frame parser
-  type   P_ST is (P_IDLE, P_DISP, P_CTRL);
+  type   P_ST is (P_IDLE, P_DISP, P_CTRL, P_CTRL2);
   signal pst    : P_ST := P_IDLE;
   signal dcnt   : integer range 0 to 6 := 0;
   signal dbuf   : string(1 to 7) := "       ";            -- frame being received
   signal dreg   : string(1 to 7) := "       ";            -- last COMPLETE frame (published)
   signal dval_i : std_logic := '0';
   signal ctrl_r : std_logic_vector(6 downto 0) := (others => '0');
+  signal ctrl2_r : std_logic_vector(6 downto 0) := (others => '0');
   signal kill_o : std_logic := '0';
 
   -- telemetry: deframed-byte counter, mod 15 (see the rx_cnt port comment)
@@ -118,6 +137,7 @@ architecture rtl of disp_inject is
   signal ms_cnt : integer range 0 to MS_DIV-1 := 0;
   signal d_ms   : integer range 0 to hold_ms := hold_ms;
   signal c_ms   : integer range 0 to ctrl_to_ms := ctrl_to_ms;
+  signal c2_ms  : integer range 0 to ctrl2_to_ms := ctrl2_to_ms;
 
 begin
 
@@ -125,6 +145,7 @@ begin
   dstr           <= dreg;
   dvalid         <= dval_i;
   ctrl           <= ctrl_r;
+  ctrl2          <= ctrl2_r;
   kill_pulse_req <= kill_o;
   rx_cnt         <= std_logic_vector(rxc_r);
 
@@ -149,10 +170,12 @@ begin
         dreg   <= "       ";
         dval_i <= '0';
         ctrl_r <= (others => '0');
+        ctrl2_r <= (others => '0');
         rxc_r  <= (others => '0');
         ms_cnt <= 0;
         d_ms   <= hold_ms;
         c_ms   <= ctrl_to_ms;
+        c2_ms  <= ctrl2_to_ms;
       else
 
         ---------------------------------------------------------------------
@@ -164,6 +187,7 @@ begin
           ms_cnt <= 0;
           if d_ms < hold_ms    then d_ms <= d_ms + 1; end if;
           if c_ms < ctrl_to_ms then c_ms <= c_ms + 1; end if;
+          if c2_ms < ctrl2_to_ms then c2_ms <= c2_ms + 1; end if;
         else
           ms_cnt <= ms_cnt + 1;
         end if;
@@ -172,6 +196,9 @@ begin
         end if;
         if c_ms >= ctrl_to_ms then
           ctrl_r(1 downto 0) <= "00";          -- ESP silent -> auto-restart + overlay OFF
+        end if;
+        if c2_ms >= ctrl2_to_ms then
+          ctrl2_r <= (others => '0');          -- ESP silent -> leave diag mode, machine comes back
         end if;
 
         ---------------------------------------------------------------------
@@ -244,6 +271,9 @@ begin
           elsif bi = 254 then                  -- 0xFE : start of a CONTROL frame
             pst <= P_CTRL;
 
+          elsif bi = 253 then                  -- 0xFD : start of a CONTROL2 frame
+            pst <= P_CTRL2;
+
           else
             case pst is
 
@@ -272,6 +302,13 @@ begin
                   if b_dat(2) = '1' and ctrl_r(2) = '0' then
                     kill_o <= '1';             -- one-shot on the 0->1 edge of bit2
                   end if;
+                end if;
+                pst <= P_IDLE;
+
+              when P_CTRL2 =>
+                if bi <= 16#7D# then
+                  ctrl2_r <= b_dat(6 downto 0);
+                  c2_ms   <= 0;                -- re-arm the fail-safe
                 end if;
                 pst <= P_IDLE;
 
