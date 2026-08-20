@@ -86,7 +86,7 @@ them; the owner supplies their own dump for their own machine.
 3. MODIFICATIONS — WHAT PSTORE CHANGED AND ADDED
 -------------------------------------------------------------------------------
 
-Copyright (c) 2026 Valère Pilpil / Pstore.
+Copyright (c) 2026 Valère Pillet / Pstore.
 Licensed under the GNU GPL v3 or later, same as upstream.
 
 The GPL requires modified files to carry prominent notices stating that they
