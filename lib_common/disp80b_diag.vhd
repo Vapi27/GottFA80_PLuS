@@ -16,7 +16,7 @@
 --   then per column: row1 char via LD1, row2 char via LD2 (ROM-interleaved).
 -- The display is initialised by the game at power-on and holds its own refresh;
 -- we only stream frames (~10 Hz restream also picks up text changes).
--- (C) 2026 Valere Pilpil / Pstore. Original implementation.
+-- (C) 2026 Valere Pillet / Pstore. Original implementation.
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;

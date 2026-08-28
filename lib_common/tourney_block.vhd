@@ -11,7 +11,7 @@
 -- EXACT passthrough, so inserting this changes nothing until tournament mode is armed.
 -- The per-game BLOCK_CODE (which select pattern = the knocker) comes from the System 80
 -- solenoid map / schematic -> verify with Ralf + on hardware before enabling.
--- (C) 2026 Valere Pilpil / Pstore.  Part of GottFA80 (GPL-3.0).
+-- (C) 2026 Valere Pillet / Pstore.  Part of GottFA80 (GPL-3.0).
 library ieee;
 use ieee.std_logic_1164.all;
 

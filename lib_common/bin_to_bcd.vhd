@@ -4,7 +4,7 @@
 --   tourney_countdown.value (binary) -> bin_to_bcd -> per-digit BCD -> SN7448 (the FPGA's
 --   existing BCD->7seg) -> display multiplex (boot_message-style). So the time-attack score
 --   can be drawn live on the machine. DIGITS nibbles, MSD = top nibble. Pure/synthesizable.
--- (C) 2026 Valere Pilpil / Pstore.  Part of GottFA80 (GPL-3.0).
+-- (C) 2026 Valere Pillet / Pstore.  Part of GottFA80 (GPL-3.0).
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;

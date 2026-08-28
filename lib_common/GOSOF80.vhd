@@ -60,6 +60,7 @@ architecture rtl of gosof80 is
 	signal uart_clk	: std_logic; -- 9600 baud clock for uart
 
 	signal cpu_addr	:	std_logic_vector(15 downto 0);
+	signal cpu_addr_full : std_logic_vector(23 downto 0);  -- port ENTIER du T65, cf. portabilite XST
 	signal cpu_din		: 	std_logic_vector(7 downto 0);
 	signal cpu_dout	:  std_logic_vector(7 downto 0);
 	signal n_cpu_nmi	: 	std_logic;
@@ -349,10 +350,11 @@ port map(
 	NMI_n => n_Cpu_nmi,
 	SO_n => '1',
 	R_W_n => cpu_wr_n,
-	A(15 downto 0) => cpu_addr,
+	A => cpu_addr_full,   -- port ENTIER, cf. portabilite XST
 	DI => cpu_din,
 	DO => cpu_dout
 );	
+cpu_addr <= cpu_addr_full(15 downto 0);   -- cf. portabilite XST
 
 -- we use a 6532 also for MA55 and MA490, so we have to adjust the address
 addr_6532 <= cpu_addr(4 downto 0) when (SB_type = is_MA216 or SB_type = is_MA309) else

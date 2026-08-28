@@ -6,7 +6,7 @@
 -- display input (e.g. display1) and activate boot_message during gameplay when time-attack
 -- is armed -> the score is drawn live on the machine. (character handling matches the style
 -- already synthesized by boot_message/sn7448_gtb.)
--- (C) 2026 Valere Pilpil / Pstore.  Part of GottFA80 (GPL-3.0).
+-- (C) 2026 Valere Pillet / Pstore.  Part of GottFA80 (GPL-3.0).
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;

@@ -9,7 +9,7 @@
 --   defaults; the optional cfg_start/cfg_decay ports let the ESP drive them at run time from a
 --   lisyctrl register (0 on a cfg port = use the generic default), so the on-display countdown
 --   always matches the operator's chosen start/decay in the web UI.
--- (C) 2026 Valere Pilpil / Pstore.  Part of GottFA80 (GPL-3.0).
+-- (C) 2026 Valere Pillet / Pstore.  Part of GottFA80 (GPL-3.0).
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;

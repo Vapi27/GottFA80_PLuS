@@ -59,3 +59,6 @@ artifacts/
 # and the ~25 pre-v1 bitstreams that were built by hand and have no manifest.
 # Nothing is deleted -- git holds the source history, this holds the rest.
 attic_experiments/
+
+# Copies de travail : quel fichier fait foi doit rester sans ambiguite.
+attic_bench_*/

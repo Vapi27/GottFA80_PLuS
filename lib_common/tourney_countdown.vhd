@@ -12,7 +12,7 @@
 -- start points and decay/sec from the web UI via a lisyctrl register (a value of 0 on a cfg
 -- port = "use the generic default", which keeps every existing instantiation/testbench that
 -- leaves them unconnected behaving exactly as before). Pure, synthesizable, sim-checked.
--- (C) 2026 Valere Pilpil / Pstore.  Part of GottFA80 (GPL-3.0).
+-- (C) 2026 Valere Pillet / Pstore.  Part of GottFA80 (GPL-3.0).
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
