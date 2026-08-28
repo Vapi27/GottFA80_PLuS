@@ -18,6 +18,14 @@
 #                  testbench still expects the pre-fix active-high encoding
 #                  (exp=32/exp=0).  The RTL is right, the testbench is stale.
 #   tb_integration same expectation, through sys80_glue.
+#   tb_sound_link  encodage des sons refait depuis. Le banc date de juin et
+#                  attend « 0x80 | son » (son 5 -> 0x85). Le module a ete
+#                  entierement repense depuis : file d'attente, et une carte
+#                  d'octets ou 0x00-0x2F doit rester SANS EFFET -- un fil coupe
+#                  se decode en 0x00 -- et ou un relachement de bus vaut 0x30.
+#                  Le RTL est juste, le banc est perime. Reecrire ses attentes
+#                  demande d'etablir la nouvelle carte d'octets en entier :
+#                  c'est un travail de banc, pas une rustine.
 # Fixing them means rewriting the expectations against the hardware-proven
 # polarity; that is a testbench job, deliberately out of scope of the v1
 # freeze, and doing it silently would hide the only two red lights in the run.
@@ -37,7 +45,7 @@ mkdir -p sim/work
 LOG=sim/run_all.log
 : > "$LOG"
 
-KNOWN_BAD="tb_lisyctrl tb_integration"
+KNOWN_BAD="tb_lisyctrl tb_integration tb_sound_link"
 PASSED=""; FAILED=""; XFAILED=""; UNEXPECTED_PASS=""; CUTLIST=""
 
 is_known_bad() { case " $KNOWN_BAD " in *" $1 "*) return 0;; *) return 1;; esac; }
@@ -97,6 +105,19 @@ run_tb tb_detect_sw   12sec "-fsynopsys" lib_common/detect_sw.vhd sim/tb_detect_
 run_tb tb_gts_family  1ms   ""           lib_common/gts_family.vhd sim/tb_gts_family.vhd
 run_tb tb_snd_wire    30ms  ""           lib_common/snd_bus.vhd lib_common/sound_link.vhd sim/sound_link_old.vhd sim/tb_snd_wire.vhd
 run_tb tb_disp_inject 200ms ""           lib_common/disp_inject.vhd sim/tb_disp_inject.vhd
+
+# Bancs recuperes de la branche `lisyctrl` le 2026-08-28. Les modules qu'ils
+# eprouvent etaient dans spartan6 depuis juillet, mais SANS banc : sept modules
+# synthetises et jamais rejoues. Les durees d'arret viennent du lanceur
+# d'origine ; l'ordre des sources est corrige -- `value_to_dispstr` instancie
+# `bin_to_bcd`, que la declaration d'origine n'analysait pas avant lui.
+run_tb tb_ay_3_8910        3ms  ""           lib_common/ay_3_8910.vhd sim/tb_ay_3_8910.vhd
+run_tb tb_bin_to_bcd       1us  ""           lib_common/bin_to_bcd.vhd sim/tb_bin_to_bcd.vhd
+run_tb tb_sound_link       2ms  ""           lib_common/sound_link.vhd sim/tb_sound_link.vhd
+run_tb tb_tourney_block    1us  ""           lib_common/tourney_block.vhd sim/tb_tourney_block.vhd
+run_tb tb_tourney_countdown 10us ""          lib_common/tourney_countdown.vhd sim/tb_tourney_countdown.vhd
+run_tb tb_value_to_dispstr 1us  ""           lib_common/bin_to_bcd.vhd lib_common/value_to_dispstr.vhd sim/tb_value_to_dispstr.vhd
+run_tb tb_tourney_display_top 20us ""        lib_common/bin_to_bcd.vhd lib_common/value_to_dispstr.vhd lib_common/tourney_countdown.vhd lib_common/tourney_display_top.vhd sim/tb_tourney_display_top.vhd
 
 # ---------------------------------------------------------------------------
 # tb_link_arb -- sound_link + ram_snoop, 1 simulated second = 1 second of real
