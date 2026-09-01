@@ -164,7 +164,10 @@ set_global_assignment -name VHDL_FILE ../lib_common/SN7448_GTB.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/SN7448.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/slow_to_fast_clock_bus.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/slow_to_fast_clock.vhd
-#set_global_assignment -name VHDL_FILE ../lib_common/nor_flash.vhd
+# Les DEUX chargeurs doivent etre dans le projet : le generic use_sd choisit
+# la branche elaboree, mais l'analyse exige les deux unites -- sinon
+# "design library work does not contain primary unit SD_Card". -- Pstore
+set_global_assignment -name VHDL_FILE ../lib_common/nor_flash.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/SD_Card.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/read_the_dips.vhd
 set_global_assignment -name VHDL_FILE ../lib_common/R6532.vhd

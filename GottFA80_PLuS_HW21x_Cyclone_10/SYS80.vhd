@@ -34,6 +34,18 @@ entity SYS80 is
 		-- set false to recover ~522 LEs on a tight device; the shared-bus
 		-- muxes then constant-fold back to the stock SD/EEPROM behaviour.
 		lisy_enable : boolean := true;
+		-- Chemin de chargement du jeu. JP1 coupe sur cette carte => le FPGA n'a
+		-- plus acces a la NOR, qui reste a l'ESP. On charge donc depuis la SD
+		-- branchee sur P4 (CS_SDcard=P4.15 + le bus MOSI/MISO/CLK). Une seule
+		-- branche est elaboree : l'autre ne coute rien. -- Pstore
+		use_sd      : boolean := true;   -- true = carte SD (prouve) | false = NOR U6
+		-- Banc sans faisceau : les retours DIP flottent -> numero de jeu ET options
+		-- aleatoires (game_option(5) inverse la famille 80B !). >= 0 : jeu force,
+		-- options neutres (DIP ouvertes). -1 = lecture DIP normale. -- Pstore
+		bench_game  : integer := -1;
+		-- true : options forcees neutres (FP actif) meme avec bench_game=-1 --
+		-- pour isoler des DIP d'option mal reglees sans toucher au choix du jeu. -- Pstore
+		bench_opts  : boolean := false;
 		esp_sound   : boolean := true;  -- true = ESP/GOSOWAV sound (drop GOSOF80+DFPlayer)
 		-- NOSND build 2026-07-09: this 80B machine has its REAL sound board (diag
 		-- test drives it via the U6_PA strobe); GOSOF80 (1709 LE + 1 M9K) freed
@@ -97,6 +109,7 @@ entity SYS80 is
 		
 		-- SPI SD card & EEprom
 		CS_SDcard	: 	buffer 	std_logic;
+		NOR_CS_FPGA	: 	buffer 	std_logic;   -- /CS de U6 (NOR des jeux), P35 via JP1 -- Pstore
 		CS_EEprom	: 	buffer 	std_logic;
 		MOSI			: 	inout 	std_logic;  -- lisyctrl: inout for shared-bus slave mode
 		MISO			: 	inout 	std_logic;
@@ -266,6 +279,8 @@ signal sb_opt_dig1			:  character;
 signal readingdips	: 	std_logic:= '1';
 signal game_select 		:  std_logic_vector(5 downto 0);
 signal game_option		: 	std_logic_vector(1 to 6);
+signal dip_gs_raw      : std_logic_vector(5 downto 0);  -- sorties brutes de RDIPS -- Pstore
+signal dip_go_raw      : std_logic_vector(1 to 6);
 signal sb_option		: 	std_logic_vector(1 to 4);
 
 -- ===========================================================================
@@ -381,6 +396,7 @@ signal lisy_u4pb, lisy_u6pa, lisy_u6pb : std_logic_vector(7 downto 0);
   signal u5pb_disp : std_logic_vector(6 downto 0);
 signal u6pa_src, u6pb_src, u4_pb_cpu   : std_logic_vector(7 downto 0);
 signal sd_cs_n, ee_cs_n, cpu_res_n     : std_logic;
+signal nor_cs_n                        : std_logic;   -- /CS pilote par nor_flash -- Pstore
 signal lisy_trig : std_logic;   -- long-press of the Gottlieb door test switch
 signal dinj_ctrl2 : std_logic_vector(6 downto 0);  -- CONTROL2 0xFD flags from the ESP
 signal lisy_by_esp : std_logic := '0';             -- diag mode was entered by the ESP, not by the door switch
@@ -489,6 +505,9 @@ signal inj_credit      : std_logic := '0';              -- press CREDIT/START (s
 --  game-over, which is why we inject buttons instead.)
 signal ar_raw_attract  : std_logic;                     -- undebounced: '1' when $0072 = 0
 signal in_attract      : std_logic := '1';              -- debounced: '1' = no game in progress
+signal hb_cnt          : unsigned(25 downto 0) := (others => '0');  -- temoin de vie 6502 -- Pstore
+signal irq_stretch     : unsigned(22 downto 0) := (others => '0');  -- etireur d'impulsion IRQ -- Pstore
+signal irq_d           : std_logic := '1';
 signal ar_db_cnt       : unsigned(21 downto 0) := (others => '0');  -- debounce timer (~84 ms max)
 signal ar_gamecnt      : unsigned(27 downto 0) := (others => '0');  -- "game has really run" timer
 signal game_qual       : std_logic := '0';              -- '1' once a game ran >= AR_T_GAME
@@ -572,7 +591,7 @@ cpu_addr <= cpu_addr_full(15 downto 0);
 -- It must therefore CHANGE STATE when a game starts and change back at game over
 -- -- that is the first thing to check on hardware.
 -- Revert with:  LED_Int <= not game_running;
-LED_Int <= in_attract;
+LED_Int <= not reset_l;   -- banc : allumee = 6502 relache -- Pstore (etait: in_attract)
 LED_SDcard <= SDcard_error;
 -- LED_ON: '0' exactly as upstream (GottFA80_PLuS Cyclone IV, `LED_ON <= '0'; --RTH`).
 -- 2026-07-30: this pin used to be driven by an XOR-reduction of `ay_audio`, a
@@ -581,7 +600,26 @@ LED_SDcard <= SDcard_error;
 -- chain evaluated to a constant '0' -- identical behaviour, stated indirectly.
 -- Both the vector and the chain are gone; lib_common/ay_3_8910.vhd is kept in
 -- the tree for the real AY integration.
-LED_ON <= '0';
+-- Temoin de vie du 6502 (banc, 31/08) : game_running ne monte qu'apres 255
+-- fronts d'IRQ du CPU -- il ne peut pas monter sur du code mort. LED active
+-- a l'etat bas sur la porteuse : CLIGNOTE (~1,4 s) = 6502 vivant, ETEINTE =
+-- CPU jamais demarre. Amont : LED_ON <= '0'; (toujours allumee). -- Pstore
+-- TEMOINS POSITIFS de banc (31/08) -- Pstore
+-- LED_ON  (active bas) : ALLUMEE = des IRQ battent (chaque front etire 165 ms ;
+--          a ~300 Hz elle parait fixe). ETEINTE = aucune IRQ.
+-- LED_Int (active bas) : ALLUMEE = reset_l relache (le 6502 est libre).
+HB: process(clk_50) begin
+  if rising_edge(clk_50) then
+    hb_cnt <= hb_cnt + 1;
+    irq_d <= cpu_irq_n;
+    if cpu_irq_n = '0' and irq_d = '1' then
+      irq_stretch <= (others => '1');
+    elsif irq_stretch /= 0 then
+      irq_stretch <= irq_stretch - 1;
+    end if;
+  end if;
+end process;
+LED_ON <= '0' when irq_stretch /= 0 else '1';
 
 
 ----------------------
@@ -768,8 +806,8 @@ port map(
 	i_Rst_L  => reset_sw_stable,     -- FPGA Reset   
    readingdips	=> readingdips,
 	--output 
-	game_select	=> game_select,
-	game_option	=> game_option,
+	game_select	=> dip_gs_raw,
+	game_option	=> dip_go_raw,
 	sb_option => sb_option,
 	-- strobes
 	strobes => DIP_Strobe,
@@ -780,6 +818,23 @@ port map(
 ----------------------
 -- System 80 / 80A / 80B family decode (see the signal block above)
 ----------------------
+GEN_DIPS_REELLES: if bench_game < 0 generate
+	game_select <= dip_gs_raw;
+end generate GEN_DIPS_REELLES;
+GEN_OPTS_REELLES: if (bench_game < 0) and (not bench_opts) generate
+	game_option <= dip_go_raw;
+end generate GEN_OPTS_REELLES;
+GEN_OPTS_FORCE: if (bench_game < 0) and bench_opts generate
+	game_option <= (1 => '0', others => '1');   -- FP actif, fam_ovr neutre, defauts
+end generate GEN_OPTS_FORCE;
+GEN_JEU_FORCE: if bench_game >= 0 generate
+	game_select <= not std_logic_vector(to_unsigned(bench_game, 6));
+	-- Option 1 FERMEE = free-play actif (opt_freeplay <= not game_option(1)) :
+	-- le banc et la machine de Valere jouent sans monnayeur. Bit 5 OUVERT :
+	-- fam_ovr='0', la famille 80B n'est pas inversee. -- Pstore
+	game_option <= (1 => '0', others => '1');
+end generate GEN_JEU_FORCE;
+
 gnum    <= not game_select;          -- game_select is inverted; this is the real number
 fam_ovr <= not game_option(5);       -- DIP CLOSED ('0') = invert the 80B decision
 
@@ -860,6 +915,14 @@ Debug <= lisy_active;
 end generate GEN_DBG_LVL;
 CS_SDcard <= 'Z' when esp_bus = '1' else '1' when lisy_active = '1' else sd_cs_n;
 CS_EEprom <= '1' when (esp_bus = '1' or lisy_active = '1') else ee_cs_n;  -- v2: KEEP the M95256 deselected during the ESP grant (no board pull-up -> a floating CS could let it fight the NOR on MISO)
+-- Le /CS de la NOR des jeux (U6) est sur NOR_CS_FPGA/P35, PAS sur CS_SDcard/P56 :
+-- cette derniere ne compte que deux pastilles et n'atteint aucun composant. On la
+-- laisse desactivee. NOR_CS_FPGA se tait des que le bus ne nous appartient plus,
+-- sinon l'ESP ne pourrait jamais ecrire les jeux (contention muette). -- Pstore
+-- P35 reste en haute impedance tant que le FPGA ne pilote pas la NOR : c'est
+-- plus sur que le pulldown applique aux broches inutilisees, qui tirerait le
+-- /CS de la NOR contre son rappel. -- Pstore
+NOR_CS_FPGA <= 'Z' when (use_sd or esp_bus = '1' or lisy_active = '1' or reset_l = '1') else nor_cs_n;
 cpu_res_n <= '0' when lisy_active = '1' else reset_l;
 u6pa_src  <= lisy_u6pa when lisy_active = '1' else U6_pa_out;
 -- Tournament: neutralise a free-game solenoid (knocker) when armed. Placeholder code = no block. -- Pstore
@@ -958,6 +1021,10 @@ game_over_relay <= game_over_relay_v(0);
 ---------------------
 -- SD card stuff
 ----------------------
+-- Deux chemins de chargement, choisis par le generic use_sd. SD_Card et
+-- nor_flash ont exactement les 12 memes ports : l'un remplace l'autre.
+-- Une seule branche est elaboree. -- Pstore
+GEN_SD: if use_sd generate
 SD_CARD: entity work.SD_Card
 port map(
 	--no_of_sectors => x"20", -- 32 sectors per rom
@@ -980,7 +1047,38 @@ port map(
 	cpu_reset_l => reset_l,
 	-- feedback
 	SDcard_error => SDcard_error
-	);	
+	);
+nor_cs_n <= '1';
+end generate GEN_SD;
+
+GEN_NOR: if not use_sd generate
+NOR_ROM: entity work.nor_flash
+generic map( spi_hz => 2000000 )   -- valeur d'origine, et celle de norprog.cpp
+port map(
+	--no_of_sectors => x"20", -- 32 sectors per rom
+	--
+	i_clk		=> clk_50,	
+	-- Control/Data Signals,
+   i_Rst_L  => not (readingdips or esp_bus),  -- + esp_bus : ne pas cadencer un bus rendu a l'ESP -- Pstore
+	-- PMOD SPI Interface
+   o_SPI_Clk  => SDcard_CLK,
+   i_SPI_MISO => MISO,
+   o_SPI_MOSI => SDcard_MOSI,
+   o_SPI_CS_n => nor_cs_n,
+	-- selection
+	selection => "0" & opt_freeplay & not game_select,   -- comme l'amont : FP = slot+64.
+	-- (le masque du 31/08 reposait sur un calcul faux : 128 slots = 2 Mo, la W25Q32 en a 4)
+	-- data
+	address_sd_card => address_sd_card,
+	data_sd_card => data_sd_card,
+	wr_rom => wr_rom,
+	-- control CPU
+	cpu_reset_l => reset_l,
+	-- feedback
+	SDcard_error => SDcard_error
+	);
+sd_cs_n <= '1';
+end generate GEN_NOR;	
 	
 ------------------
 -- ROMs ----------
