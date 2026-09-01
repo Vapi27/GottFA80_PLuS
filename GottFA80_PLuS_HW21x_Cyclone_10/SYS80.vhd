@@ -110,6 +110,7 @@ entity SYS80 is
 		-- SPI SD card & EEprom
 		CS_SDcard	: 	buffer 	std_logic;
 		NOR_CS_FPGA	: 	buffer 	std_logic;   -- /CS de U6 (NOR des jeux), P35 via JP1 -- Pstore
+		esp_link_tx	: 	out 	std_logic;   -- beacon jeu/FP vers l'ESP, P142 -> GPIO18 -- Pstore
 		CS_EEprom	: 	buffer 	std_logic;
 		MOSI			: 	inout 	std_logic;  -- lisyctrl: inout for shared-bus slave mode
 		MISO			: 	inout 	std_logic;
@@ -878,6 +879,21 @@ port map(
 	dig2_ascii => open
 	);
 		
+-- Le FPGA dit a l'ESP ce qu'il a charge : numero de jeu, free-play, famille,
+-- 6502 vivant. Le fil (P142 -> GPIO18) etait cable au PCB depuis toujours ;
+-- c'est la premiere fois que l'entite s'en sert. -- Pstore
+BEACON: entity work.game_beacon
+port map(
+	clk          => clk_50,
+	gnum         => gnum,
+	fp           => opt_freeplay,
+	game_running => game_running,
+	is_80B       => is_80B,
+	is_80A       => is_80A,
+	reset_l      => reset_l,
+	tx           => esp_link_tx
+);
+
 -- RIOT IRQ outputs all assert CPU IRQ input
 cpu_irq_n <= U4_irq_n and U5_irq_n and U6_irq_n;		
 --cpu_irq_n <= '1';
