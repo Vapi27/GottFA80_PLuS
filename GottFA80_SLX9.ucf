@@ -1,0 +1,193 @@
+# --- Reglages globaux (Pstore, 29/08/2026) --------------------------------
+# VCCAUX : le regulateur U4 a ete supprime de la carte, la banque auxiliaire
+# est alimentee en 3,3 V. Sans cette ligne ISE suppose 2,5 V.
+CONFIG VCCAUX = "3.3";
+# Contrainte de periode : absente du fichier d'origine, on construisait donc
+# sans savoir si le timing passait. Mesure avec nor_flash : 10,392 ns
+# atteignables pour 20 ns demandes.
+NET "clk_50" TNM_NET = TNM_clk50;
+TIMESPEC TS_clk50 = PERIOD "TNM_clk50" 20 ns HIGH 50%;
+# Les 7 signaux SPARE_IO_1/2/3 et CFG_* ont ete RETIRES : absents de l'entite
+# SYS80, ils faisaient echouer ngdbuild sur 16 erreurs (aucun bitstream).
+# Les CFG_* ne vont qu'a U5, la flash de configuration, que le design ne
+# touche pas. NOR_CS_FPGA, lui, est desormais un vrai port du design.
+# --------------------------------------------------------------------------
+
+#==============================================================================
+# GottFA80_SLX9.ucf — contraintes d'implantation ISE
+#
+# Composant  : XC6SLX9-2TQG144C (Spartan-6, TQFP-144, 20 x 20 mm)
+# Date       : 2026-08-15
+# Projet     : GottFA80_PLuS — portage de la devboard Cyclone 10 de bontango
+#
+# LE BROCHAGE DES CONNECTEURS EST FIGE PAR ~/gottfa-hw/CONNECTORS_MAP.md.
+# C'est le contrat d'interchangeabilite avec la devboard existante : aucune
+# position de P1..P4 ne se renegocie. Ce fichier n'affecte que le cote FPGA.
+#
+# ORIENTATION DU BOITIER — FORCEE, ce n'est pas un choix esthetique.
+# La banque 2 porte les 4 broches de configuration Master SPI + 3 straps
+# (INIT_B, M0, M1) : il n'y reste que 19 E/S libres sur 26. Des quatre
+# connecteurs (P1=24, P2=22, P3=23, P4=17 signaux), seul P4 y tient :
+# 17 signaux + clk_50 = 18 des 19 places, la 19e (broche 47, RDWR_B) etant
+# laissee libre a dessein. La banque 2 doit donc faire
+# face a P4, c'est-a-dire au bord GAUCHE. En TQFP-144 natif la banque 2 est
+# le bord bas ; il faut donc poser le boitier tourne de 90 deg dans le sens
+# horaire (= rotation 270 deg au sens KiCad), ce qui donne :
+#     banque 3 -> bord HAUT   face a P3
+#     banque 2 -> bord GAUCHE face a P4
+#     banque 1 -> bord BAS    face a P1   (24 E/S = 24 segments, exact)
+#     banque 0 -> bord DROIT  face a P2
+# ⚠ Cette rotation doit etre reportee telle quelle dans l'implantation KiCad.
+#
+# SENS DE PARCOURS. Les numeros de broches du boitier tournent dans le sens
+# antihoraire, et les quatre connecteurs sont numerotes dans ce meme sens
+# (P1 pin 1 a gauche, P2 pin 1 en bas, P3 pin 1 a droite, P4 pin 1 en haut :
+# deduit des rotations 0/90/180/270 relevees dans MECANIQUE.md). Affecter
+# les numeros croissants d'un bord aux positions croissantes du connecteur
+# qui lui fait face suffit donc a garantir zero croisement de piste.
+#
+# Toutes les banques sont alimentees en 3,3 V -> LVCMOS33 partout.
+# NOM DES NETS : convention ISE/XST `signal<n>` pour les bus. Si le projet
+# est compile avec la convention `signal[n]`, faire la substitution.
+#==============================================================================
+
+#------------------------------------------------------------------------------
+# P1 — bord BAS du boitier = banque 1 — 24 segments d'afficheur  (24 signaux)
+#   P1 est en (48,00 ; 3,55), sous le FPGA. Banque 1 = 24 E/S pour 24 signaux :
+#   banque pleine au signal pres, zero marge de ce cote.
+#------------------------------------------------------------------------------
+NET "disp_segments<1>"          LOC = "P74"   | IOSTANDARD = LVCMOS33;   # P1.1      IO_L74N_DOUT_BUSY_1  (bq 1)
+NET "disp_segments<2>"          LOC = "P75"   | IOSTANDARD = LVCMOS33;   # P1.2      IO_L74P_AWAKE_1  (bq 1)
+NET "disp_segments<3>"          LOC = "P78"   | IOSTANDARD = LVCMOS33;   # P1.3      IO_L47N_1  (bq 1)
+NET "disp_segments<4>"          LOC = "P79"   | IOSTANDARD = LVCMOS33;   # P1.4      IO_L47P_1  (bq 1)
+NET "disp_segments<6>"          LOC = "P80"   | IOSTANDARD = LVCMOS33;   # P1.5      IO_L46N_1  (bq 1)
+NET "disp_segments<7>"          LOC = "P81"   | IOSTANDARD = LVCMOS33;   # P1.6      IO_L46P_1  (bq 1)
+NET "disp_segments<5>"          LOC = "P82"   | IOSTANDARD = LVCMOS33;   # P1.7      IO_L45N_1  (bq 1)
+NET "disp_segments<8>"          LOC = "P83"   | IOSTANDARD = LVCMOS33;   # P1.8      IO_L45P_1  (bq 1)
+NET "disp_segments<9>"          LOC = "P84"   | IOSTANDARD = LVCMOS33;   # P1.9      IO_L43N_GCLK4_1  (bq 1)
+NET "disp_segments<10>"         LOC = "P85"   | IOSTANDARD = LVCMOS33;   # P1.10     IO_L43P_GCLK5_1  (bq 1)
+NET "disp_segments<11>"         LOC = "P87"   | IOSTANDARD = LVCMOS33;   # P1.11     IO_L42N_GCLK6_TRDY1_1  (bq 1)
+NET "disp_segments<12>"         LOC = "P88"   | IOSTANDARD = LVCMOS33;   # P1.12     IO_L42P_GCLK7_1  (bq 1)
+NET "disp_segments<13>"         LOC = "P92"   | IOSTANDARD = LVCMOS33;   # P1.13     IO_L41N_GCLK8_1  (bq 1)
+NET "disp_segments<14>"         LOC = "P93"   | IOSTANDARD = LVCMOS33;   # P1.14     IO_L41P_GCLK9_IRDY1_1  (bq 1)
+NET "disp_segments<15>"         LOC = "P94"   | IOSTANDARD = LVCMOS33;   # P1.15     IO_L40N_GCLK10_1  (bq 1)
+NET "disp_segments<16>"         LOC = "P95"   | IOSTANDARD = LVCMOS33;   # P1.16     IO_L40P_GCLK11_1  (bq 1)
+NET "disp_segments<17>"         LOC = "P97"   | IOSTANDARD = LVCMOS33;   # P1.17     IO_L34N_1  (bq 1)
+NET "disp_segments<18>"         LOC = "P98"   | IOSTANDARD = LVCMOS33;   # P1.18     IO_L34P_1  (bq 1)
+NET "disp_segments<19>"         LOC = "P99"   | IOSTANDARD = LVCMOS33;   # P1.19     IO_L33N_1  (bq 1)
+NET "disp_segments<20>"         LOC = "P100"  | IOSTANDARD = LVCMOS33;   # P1.20     IO_L33P_1  (bq 1)
+NET "disp_segments<21>"         LOC = "P101"  | IOSTANDARD = LVCMOS33;   # P1.21     IO_L32N_1  (bq 1)
+NET "disp_segments<22>"         LOC = "P102"  | IOSTANDARD = LVCMOS33;   # P1.22     IO_L32P_1  (bq 1)
+NET "disp_segments<23>"         LOC = "P104"  | IOSTANDARD = LVCMOS33;   # P1.23     IO_L1N_VREF_1  (bq 1)
+NET "disp_segments<24>"         LOC = "P105"  | IOSTANDARD = LVCMOS33;   # P1.24     IO_L1P_1  (bq 1)
+
+#------------------------------------------------------------------------------
+# P2 — bord DROIT du boitier = banque 0  (22 signaux)
+#   P2 est en (70,86 ; 26,41), a droite. Numerotation P2.4 en bas -> P2.25 en haut,
+#   broches 111 (bas) -> 140 (haut) : meme sens, aucun croisement.
+#------------------------------------------------------------------------------
+NET "U5_PA<0>"                  LOC = "P111"  | IOSTANDARD = LVCMOS33;   # P2.4      IO_L66N_SCP0_0  (bq 0)
+NET "U5_PA<1>"                  LOC = "P112"  | IOSTANDARD = LVCMOS33;   # P2.5      IO_L66P_SCP1_0  (bq 0)
+NET "U5_PA<2>"                  LOC = "P114"  | IOSTANDARD = LVCMOS33;   # P2.6      IO_L65N_SCP2_0  (bq 0)
+NET "U5_PA<3>"                  LOC = "P115"  | IOSTANDARD = LVCMOS33;   # P2.7      IO_L65P_SCP3_0  (bq 0)
+NET "U6_PB<2>"                  LOC = "P118"  | IOSTANDARD = LVCMOS33;   # P2.10     IO_L63N_SCP6_0  (bq 0)
+NET "U6_PB<1>"                  LOC = "P119"  | IOSTANDARD = LVCMOS33;   # P2.11     IO_L63P_SCP7_0  (bq 0)
+NET "DIP_Return<3>"             LOC = "P120"  | IOSTANDARD = LVCMOS33;   # P2.12     IO_L62N_VREF_0  (bq 0)
+NET "myTest"                    LOC = "P123"  | IOSTANDARD = LVCMOS33;   # P2.14     IO_L37N_GCLK12_0  (bq 0)
+NET "U5_PA_7"                   LOC = "P124"  | IOSTANDARD = LVCMOS33;   # P2.15     IO_L37P_GCLK13_0  (bq 0)
+NET "U6_PB<3>"                  LOC = "P126"  | IOSTANDARD = LVCMOS33;   # P2.16     IO_L36N_GCLK14_0  (bq 0)
+NET "U6_PB<4>"                  LOC = "P127"  | IOSTANDARD = LVCMOS33;   # P2.17     IO_L36P_GCLK15_0  (bq 0)
+NET "U6_PB<5>"                  LOC = "P131"  | IOSTANDARD = LVCMOS33;   # P2.18     IO_L35N_GCLK16_0  (bq 0)
+NET "U6_PB<6>"                  LOC = "P132"  | IOSTANDARD = LVCMOS33;   # P2.19     IO_L35P_GCLK17_0  (bq 0)
+NET "U6_PB<7>"                  LOC = "P133"  | IOSTANDARD = LVCMOS33;   # P2.20     IO_L34N_GCLK18_0  (bq 0)
+NET "U6_PA<3>"                  LOC = "P134"  | IOSTANDARD = LVCMOS33;   # P2.21     IO_L34P_GCLK19_0  (bq 0)
+NET "U6_PA<1>"                  LOC = "P137"  | IOSTANDARD = LVCMOS33;   # P2.22     IO_L4N_0  (bq 0)
+NET "U6_PA<2>"                  LOC = "P138"  | IOSTANDARD = LVCMOS33;   # P2.23     IO_L4P_0  (bq 0)
+NET "U6_PA<0>"                  LOC = "P139"  | IOSTANDARD = LVCMOS33;   # P2.24     IO_L3N_0  (bq 0)
+NET "U6_PA<6>"                  LOC = "P140"  | IOSTANDARD = LVCMOS33;   # P2.25     IO_L3P_0  (bq 0)
+
+#------------------------------------------------------------------------------
+# P3 — bord HAUT du boitier = banque 3  (23 signaux)
+#   P3 est en (48,00 ; 49,27), au-dessus. Numerotation P3.3 a droite -> P3.25 a gauche,
+#   broches 1 (droite) -> 32 (gauche) : meme sens, aucun croisement.
+#   La broche 35, extremite gauche de ce bord, porte NOR_CS_FPGA (section interne).
+#------------------------------------------------------------------------------
+NET "U6_PB<0>"                  LOC = "P1"    | IOSTANDARD = LVCMOS33;   # P3.3      IO_L83N_VREF_3  (bq 3)
+NET "U6_PA<4>"                  LOC = "P2"    | IOSTANDARD = LVCMOS33;   # P3.4      IO_L83P_3  (bq 3)
+NET "U6_PA<7>"                  LOC = "P5"    | IOSTANDARD = LVCMOS33;   # P3.5      IO_L52N_3  (bq 3)
+NET "U6_PA<5>"                  LOC = "P6"    | IOSTANDARD = LVCMOS33;   # P3.6      IO_L52P_3  (bq 3)
+NET "U4_PB<0>"                  LOC = "P7"    | IOSTANDARD = LVCMOS33;   # P3.7      IO_L51N_3  (bq 3)
+NET "U5_PB_7"                   LOC = "P8"    | IOSTANDARD = LVCMOS33;   # P3.8      IO_L51P_3  (bq 3)
+NET "U4_PB<2>"                  LOC = "P9"    | IOSTANDARD = LVCMOS33;   # P3.9      IO_L50N_3  (bq 3)
+NET "U4_PB<1>"                  LOC = "P10"   | IOSTANDARD = LVCMOS33;   # P3.10     IO_L50P_3  (bq 3)
+NET "U4_PB<4>"                  LOC = "P11"   | IOSTANDARD = LVCMOS33;   # P3.11     IO_L49N_3  (bq 3)
+NET "U4_PB<3>"                  LOC = "P12"   | IOSTANDARD = LVCMOS33;   # P3.12     IO_L49P_3  (bq 3)
+NET "U4_PB<6>"                  LOC = "P14"   | IOSTANDARD = LVCMOS33;   # P3.13     IO_L44N_GCLK20_3  (bq 3)
+NET "U4_PB<5>"                  LOC = "P15"   | IOSTANDARD = LVCMOS33;   # P3.14     IO_L44P_GCLK21_3  (bq 3)
+NET "U4_PA<0>"                  LOC = "P16"   | IOSTANDARD = LVCMOS33;   # P3.15     IO_L43N_GCLK22_IRDY2_3  (bq 3)
+NET "U4_PB<7>"                  LOC = "P17"   | IOSTANDARD = LVCMOS33;   # P3.16     IO_L43P_GCLK23_3  (bq 3)
+NET "U4_PA<2>"                  LOC = "P21"   | IOSTANDARD = LVCMOS33;   # P3.17     IO_L42N_GCLK24_3  (bq 3)
+NET "U4_PA<1>"                  LOC = "P22"   | IOSTANDARD = LVCMOS33;   # P3.18     IO_L42P_GCLK25_TRDY2_3  (bq 3)
+NET "U4_PA<4>"                  LOC = "P23"   | IOSTANDARD = LVCMOS33;   # P3.19     IO_L41N_GCLK26_3  (bq 3)
+NET "U4_PA<3>"                  LOC = "P24"   | IOSTANDARD = LVCMOS33;   # P3.20     IO_L41P_GCLK27_3  (bq 3)
+NET "U4_PA<6>"                  LOC = "P26"   | IOSTANDARD = LVCMOS33;   # P3.21     IO_L37N_3  (bq 3)
+NET "U4_PA<5>"                  LOC = "P27"   | IOSTANDARD = LVCMOS33;   # P3.22     IO_L37P_3  (bq 3)
+NET "DIP_Strobe<0>"             LOC = "P29"   | IOSTANDARD = LVCMOS33;   # P3.23     IO_L36N_3  (bq 3)
+NET "U4_PA<7>"                  LOC = "P30"   | IOSTANDARD = LVCMOS33;   # P3.24     IO_L36P_3  (bq 3)
+NET "reset_sw"                  LOC = "P32"   | IOSTANDARD = LVCMOS33;   # P3.25     IO_L2N_3  (bq 3)
+
+#------------------------------------------------------------------------------
+# P4 — bord GAUCHE du boitier = banque 2  (17 signaux)
+#   P4 est en (25,14 ; 26,41), a gauche. Numerotation P4.3 en haut -> P4.24 en bas,
+#   broches 40 (haut) -> 67 (bas) : meme sens, aucun croisement.
+#   La broche 47 (RDWR_B) est volontairement sautee - voir AFFECTATION.md.
+#------------------------------------------------------------------------------
+NET "LED_ON"                    LOC = "P40"   | IOSTANDARD = LVCMOS33;   # P4.3      IO_L64N_D9_2  (bq 2)
+NET "Audio_RX"                  LOC = "P41"   | IOSTANDARD = LVCMOS33;   # P4.4      IO_L64P_D8_2  (bq 2)
+NET "LED_SDcard"                LOC = "P43"   | IOSTANDARD = LVCMOS33;   # P4.5      IO_L62N_D6_2  (bq 2)
+NET "Sound"                     LOC = "P44"   | IOSTANDARD = LVCMOS33;   # P4.6      IO_L62P_D5_2  (bq 2)
+NET "LED_Int"                   LOC = "P45"   | IOSTANDARD = LVCMOS33;   # P4.7      IO_L49N_D4_2  (bq 2)
+NET "Debug"                     LOC = "P46"   | IOSTANDARD = LVCMOS33;   # P4.11     IO_L49P_D3_2  (bq 2)
+NET "DIP_Return<0>"             LOC = "P48"   | IOSTANDARD = LVCMOS33;   # P4.12     IO_L48P_D7_2  (bq 2)
+NET "DIP_Return<2>"             LOC = "P50"   | IOSTANDARD = LVCMOS33;   # P4.13     IO_L31N_GCLK30_D15_2  (bq 2)
+NET "DIP_Return<1>"             LOC = "P55"   | IOSTANDARD = LVCMOS33;   # P4.14     IO_L30N_GCLK0_USERCCLK_2  (bq 2)
+NET "CS_SDcard"                 LOC = "P56"   | IOSTANDARD = LVCMOS33;   # P4.15     IO_L30P_GCLK1_D13_2  (bq 2)
+NET "DIP_Strobe<3>"             LOC = "P57"   | IOSTANDARD = LVCMOS33;   # P4.16     IO_L14N_D12_2  (bq 2)
+NET "DIP_Strobe<2>"             LOC = "P58"   | IOSTANDARD = LVCMOS33;   # P4.17     IO_L14P_D11_2  (bq 2)
+NET "DIP_Strobe<1>"             LOC = "P59"   | IOSTANDARD = LVCMOS33;   # P4.18     IO_L13N_D10_2  (bq 2)
+NET "CS_EEprom"                 LOC = "P61"   | IOSTANDARD = LVCMOS33;   # P4.21     IO_L12N_D2_MISO3_2  (bq 2)
+NET "MISO"                      LOC = "P62"   | IOSTANDARD = LVCMOS33;   # P4.22     IO_L12P_D1_MISO2_2  (bq 2)
+NET "MOSI"                      LOC = "P66"   | IOSTANDARD = LVCMOS33;   # P4.23     IO_L2N_CMPMOSI_2  (bq 2)
+NET "CLK"                       LOC = "P67"   | IOSTANDARD = LVCMOS33;   # P4.24     IO_L2P_CMPCLK_2  (bq 2)
+
+#------------------------------------------------------------------------------
+# SIGNAUX INTERNES — non cables sur P1..P4  (6 signaux)
+#   clk_50 vient de l'oscillateur (a placer face a la broche 51) ; les 4 CFG_* vont a
+#   la flash de configuration ; NOR_CS_FPGA va a la NOR partagee avec l'ESP32 et sort
+#   en 35, extremite gauche du bord haut, cote tiers libre ou vit la NOR.
+#------------------------------------------------------------------------------
+NET "clk_50"                    LOC = "P51"   | IOSTANDARD = LVCMOS33;   # interne   IO_L31P_GCLK31_D14_2  (bq 2)
+NET "NOR_CS_FPGA"               LOC = "P35"   | IOSTANDARD = LVCMOS33;   # interne   IO_L1P_3  (bq 3)
+NET "esp_link_tx"               LOC = "P142"  | IOSTANDARD = LVCMOS33;   # interne   beacon jeu/FP -> ESP GPIO18 (UART1 RX)
+
+#------------------------------------------------------------------------------
+# BROCHES VOLONTAIREMENT NON AFFECTEES
+#------------------------------------------------------------------------------
+# Straps de mode — a cabler en dur sur le PCB, JAMAIS a un signal du flipper :
+#   P39  IO_L65P_INIT_B_2   INIT_B    (pull-up 4k7 vers 3V3)
+#   P60  IO_L13P_M1_2       M1        ) M0=0, M1=0 -> Master SPI
+#   P69  IO_L1N_M0_CMPMISO_2 M0       )
+#   P144 IO_L1P_HSWAPEN_0   HSWAPEN   (niveau a arreter — voir AFFECTATION.md)
+#
+# Broches dediees, hors des 102 E/S (verifie dans le .tsv : banque = '-') :
+#   P37 PROGRAM_B   P71 DONE   P72 CMPCS_B   P73 SUSPEND (a tirer a la masse)
+#   P106 TDO  P107 TMS  P109 TCK  P110 TDI  -> en-tete JTAG
+#
+# E/S libres, gardees en reserve (6) :
+#   P33   IO_L2P_3               banque 3
+#   P34   IO_L1N_VREF_3          banque 3
+#   P47   IO_L48N_RDWR_B_VREF_2  banque 2
+#   P141  IO_L2N_0               banque 0
+#   P142  IO_L2P_0               banque 0
+#   P143  IO_L1N_VREF_0          banque 0
+#==============================================================================
