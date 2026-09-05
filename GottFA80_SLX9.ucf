@@ -168,6 +168,12 @@ NET "CLK"                       LOC = "P67"   | IOSTANDARD = LVCMOS33;   # P4.24
 #------------------------------------------------------------------------------
 NET "clk_50"                    LOC = "P51"   | IOSTANDARD = LVCMOS33;   # interne   IO_L31P_GCLK31_D14_2  (bq 2)
 NET "NOR_CS_FPGA"               LOC = "P35"   | IOSTANDARD = LVCMOS33;   # interne   IO_L1P_3  (bq 3)
+# Voix de l'ESP : ESP GPIO17 (net ESP32_TX, gottfa-hw/ETAT.md:856) -> P143.
+# Le fil existait deja sur la carte et n'etait contraint NULLE PART -- c'est lui
+# qui porte desormais le flux audio vers audio_uart -> dac -> Sound (P44) -> RC
+# 3k3/4n7 -> TDA7267. PULLUP : une ligne UART est au repos a '1', et sans ESP en
+# face une entree flottante ferait decoder des octets au hasard, donc du bruit.
+NET "esp_audio_rx"              LOC = "P143" | IOSTANDARD = LVCMOS33 | PULLUP;   # interne   ESP GPIO17 -> audio
 NET "esp_link_tx"               LOC = "P142"  | IOSTANDARD = LVCMOS33;   # interne   beacon jeu/FP -> ESP GPIO18 (UART1 RX)
 
 #------------------------------------------------------------------------------

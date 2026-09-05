@@ -124,6 +124,12 @@ entity SYS80 is
 		-- Sound
 		Audio_RX			: 	in 	std_logic;   -- ESP -> FPGA display-inject UART RX (PIN_2)
 		Sound 			: 	buffer 	std_logic;
+		-- Voix de l'ESP, un fil : ESP GPIO17 (net ESP32_TX) -> FPGA P143. Deja cable
+		-- sur la carte et contraint nulle part jusqu'ici. Flux d'octets 8N1 dont
+		-- CHAQUE octet est un echantillon audio -- voir lib_common/audio_uart.vhd.
+		-- Valeur par defaut '1' = ligne UART au repos : un build qui ne contraint
+		-- pas cette broche se comporte comme avant au lieu de sortir du bruit.
+		esp_audio_rx	: 	in 	std_logic := '1';
 
 		-- debug
 		Debug			:	out 	std_logic
@@ -2113,7 +2119,22 @@ port map(
 );
 Debug    <= sl_tx;
 -- Audio_RX/PIN_2 is now an INPUT (ESP GPIO9 display-inject UART TX is wired to it).
-Sound    <= '0';
+-- L'ETAGE AUDIO DE LA PORTEUSE, RENDU A L'ESP.
+-- `Sound` (P44) porte le flux delta-sigma vers le filtre RC 3k3/4n7 puis le
+-- TDA7267. Sans GOSOF80 elle etait simplement mise a '0' -- gaspillage : c'est le
+-- SEUL etage audio du montage, le module n'en a aucun. On y joue donc ce que
+-- l'ESP envoie sur esp_audio_rx.
+-- Le debit de l'UART fixe seul la frequence d'echantillonnage (BAUD/10 en 8N1),
+-- donc il n'y a ni FIFO, ni horloge locale, ni derive a rattraper.
+ESP_AUDIO : entity work.audio_uart
+generic map ( CLK_HZ => 50000000, BAUD => 220500, SILENCE_MS => 50 )
+port map (
+	clk     => clk_50,
+	reset_n => reset_sw_stable,
+	rx      => esp_audio_rx,
+	audio_o => Sound,
+	active  => open
+);
 end generate GEN_ESP_SND;
 
 -- HYBRID build: GOSOF80 stays the sound source (GEN_FPGA_SND drives Sound/PIN_7 + the unused

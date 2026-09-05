@@ -132,5 +132,34 @@ grep -m1 -E "All constraints were met|constraints were not met" $TOP.par | sed '
 echo
 echo "== OCCUPATION REELLE, APRES PLACEMENT (pas l'estimation de synthese) =="
 grep -E "Slice Registers|Slice LUTs|occupied Slices|RAMB(8|16)BWER|bonded IOB|DSP48" m.mrp | head -10
+
+# --- 6/6 : le bitstream, et le SVF qui le charge ---------------------------------
+# /!\ UnusedPin:Pulldown : les broches non affectees sortent sur les connecteurs, et
+#     sur le module Smart FA les grilles des MOSFET de bobines sont actives au HAUT.
+#     Un Pullup les mettrait sous tension -- c'est deja arrive, une bobine a chauffe.
+if [ "${BITGEN:-1}" = "1" ]; then
+  echo
+  echo "== 6/6 bitgen puis SVF =="
+  $X/bitgen -w -intstyle silent \
+      -g StartupClk:Cclk -g DriveDone:Yes -g UnusedPin:Pulldown -g ConfigRate:16 \
+      $TOP.ncd $TOP.bit $TOP.pcf > bitgen.log 2>&1 || { echo "BITGEN a echoue, voir $D/bitgen.log"; exit 1; }
+  grep -q "UnusedPin *| *Pulldown" $TOP.bgn || { echo "BITGEN : tirage inattendu, ARRET"; exit 1; }
+
+  # LE .BIT NE SUFFIT PAS : par le pont XVC il se charge a 100 %, sans erreur, et
+  # DONE reste bas. Il faut un .svf. Piege deja paye sur ce projet.
+  cat > s.cmd <<CMD
+setMode -bs
+setCable -port svf -file $D/$TOP.svf
+addDevice -p 1 -file $D/$TOP.bit
+program -p 1
+quit
+CMD
+  $X/impact -batch s.cmd > impact.log 2>&1 || { echo "IMPACT a echoue, voir $D/impact.log"; exit 1; }
+  [ -s $TOP.svf ] || { echo "IMPACT n'a PAS ecrit le SVF, voir impact.log"; exit 1; }
+  # les commentaires du SVF ont deja avale l'ordre suivant : on les retire.
+  sed 's://.*$::' $TOP.svf > ${TOP}_clean.svf
+  echo "   $D/${TOP}_clean.svf   <- c'est CELUI-CI qu'on charge"
+fi
+
 echo
 echo "   repertoire : $D"
