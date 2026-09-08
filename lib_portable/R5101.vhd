@@ -1,36 +1,48 @@
--- R5101 -- RAM double port a largeurs mixtes.  REECRITURE PORTABLE, VERSION SCINDEE.
 -- ============================================================================
--- 2026-08-13, branche spartan6-feasibility.
+-- R5101 -- RAM CMOS 5101 du System 80 (256 x 4 bits), vue en DOUBLE PORT VRAI.
 --
--- POURQUOI CETTE VERSION.  La premiere reecriture stockait un seul tableau de
--- 256 quartets, adresse en quartets par le port A et en octets par le port B.
--- Equivalence prouvee en simulation (2 773 comparaisons, 0 divergence) MAIS
--- Quartus ne savait pas l inferer en memoire bloc : elle partait en logique et
--- le design ne rentrait plus (7 162 noeuds combinatoires pour 6 272).
--- L attribut `ramstyle => "M9K"` n y changeait rien -- verifie en build --clean.
+-- Port A : le 6502, par quartets (address_a(0) choisit pair/impair).
+-- Port B : la restauration/sauvegarde EEPROM, par octets (les deux quartets).
 --
--- IDEE.  Scinder en DEUX memoires de MEME largeur, 128 x 4 chacune :
---   ram_even(i) = le quartet vu par le port A a l adresse PAIRE  2*i
---   ram_odd (i) = le quartet vu par le port A a l adresse IMPAIRE 2*i+1
--- Le port A choisit l une des deux par address_a(0) ; le port B lit ou ecrit
--- les deux EN PARALLELE a l index address_b.  Les deux memoires deviennent
--- ainsi de simples doubles ports a largeur uniforme -- la structure la plus
--- banale qui soit, reconnue par tous les synthetiseurs.
+-- 🔴 DEUX ECRIVAINS, ET C'EST NECESSAIRE. Une version precedente multiplexait les
+-- ecritures en donnant la priorite au port B, sur la premisse ecrite noir sur
+-- blanc que « les deux ne peuvent pas ecrire en meme temps dans la machine ».
+-- CETTE PREMISSE ETAIT FAUSSE, et jamais verifiee. SYS80.vhd cable
+-- `wren_b => wr_ram`, et le module EEprom se declenche sur `game_over_relay`,
+-- `test_sw` et `credit_sw` : la rafale EEPROM tombe donc EXACTEMENT a la fin de
+-- partie, pendant que le 6502 initialise son attract. Toutes ses ecritures vers
+-- la CMOS etaient jetees -- y compris a des adresses DIFFERENTES, que l'original
+-- appliquait. Symptome sur la machine : l'attract demarre (2-3 lampes) puis
+-- s'arrete, alors qu'une partie se deroule parfaitement. Mesure au banc
+-- tb_croise : 65 comparaisons, 65 divergences (2026-09-07).
 --
--- Convention des quartets CONFIRMEE en simulation contre l original :
---   octet B = quartet impair (poids fort) & quartet pair (poids faible)
+-- L'original ne laisse indefini QUE le cas « les deux ecrivent AU MEME endroit »
+-- (mixed_ports = DONT_CARE). Pour deux adresses differentes il applique les deux.
 --
--- Semantique conservee : outdata_reg = UNREGISTERED sur les deux ports -> 1
--- cycle de latence ; read_during_write = NEW_DATA -> ecriture prioritaire ;
--- mixed_ports = DONT_CARE -> aucun comportement garanti si les deux ports
--- ecrivent au meme endroit au meme instant, donc rien a reproduire la-dessus.
+-- FORME RETENUE : le modele canonique du double port vrai -- une VARIABLE
+-- PARTAGEE par tableau, et UN PROCESSUS PAR PORT ET PAR TABLEAU, sans condition
+-- sur la cible : `if we then RAM(a) := d; end if;  q <= RAM(a);` et rien d'autre.
+-- Ecrire conditionnellement dans l'un OU l'autre tableau depuis un meme processus
+-- suffit a faire abandonner XST : mesure du 2026-09-07, 6631 LUT au lieu de 3898,
+-- le design ne rentrait plus. Le multiplexage (pair/impair, quartets) est donc
+-- SORTI des processus de RAM.
+-- C'est ce que XST et Quartus reconnaissent pour mettre le tableau en bloc RAM
+-- avec deux ports d'ecriture, et ca rend la semantique de l'original la ou elle
+-- est definie. Mon objection d'alors -- « visible un cycle trop tot » -- ne
+-- portait que sur le cas meme-adresse, precisement celui qui est DONT_CARE.
+--
+-- ⚠️ TOUTE MODIFICATION SE REJOUE SUR LES DEUX BANCS :
+--      sim/tb_R5101_equiv.vhd  (sequentiel, un seul port ecrivant)
+--      tb_croise               (LES DEUX PORTS ECRIVANT -- le cas de la machine)
+--    Le premier passait alors que le design etait casse : il ne couvre pas le
+--    croisement. Un banc qui passe ne prouve que ce qu'il regarde.
 -- ============================================================================
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 entity R5101 is
-	port (
+	port(
 		address_a : in  std_logic_vector(7 downto 0);
 		address_b : in  std_logic_vector(6 downto 0);
 		clock     : in  std_logic := '1';
@@ -45,57 +57,56 @@ end R5101;
 
 architecture inferred of R5101 is
 	type nib_t is array (0 to 127) of std_logic_vector(3 downto 0);
-	signal ram_even : nib_t;    -- quartets d adresse A paire
-	signal ram_odd  : nib_t;    -- quartets d adresse A impaire
+	shared variable ram_even : nib_t;
+	shared variable ram_odd  : nib_t;
 
-	attribute ramstyle  : string;            -- Intel/Altera
-	attribute ram_style : string;            -- Xilinx et autres
-	attribute ramstyle  of ram_even : signal is "M9K";
-	attribute ramstyle  of ram_odd  : signal is "M9K";
-	attribute ram_style of ram_even : signal is "block";
-	attribute ram_style of ram_odd  : signal is "block";
+	signal ia, ib : integer range 0 to 127;
+	signal sel    : std_logic;
+	signal sel_d  : std_logic := '0';
 
-	signal q_a_r : std_logic_vector(3 downto 0) := (others => '0');
-	signal q_b_r : std_logic_vector(7 downto 0) := (others => '0');
+	signal qae, qao, qbe, qbo : std_logic_vector(3 downto 0) := (others => '0');
 begin
-	process (clock)
-		variable ia  : integer range 0 to 127;
-		variable sel : std_logic;
-		variable ib  : integer range 0 to 127;
-	begin
+	ia  <= to_integer(unsigned(address_a(7 downto 1)));
+	sel <= address_a(0);
+	ib  <= to_integer(unsigned(address_b));
+
+	-- Quatre blocs STRICTEMENT au modele : une ecriture inconditionnelle en cible,
+	-- une lecture rangee. Rien d'autre, sinon l'inference tombe.
+	EVEN_A : process (clock) begin
 		if rising_edge(clock) then
-			ia  := to_integer(unsigned(address_a(7 downto 1)));
-			sel := address_a(0);
-			ib  := to_integer(unsigned(address_b));
-
-			-- ---- ecritures ----------------------------------------------
-			if wren_a = '1' then
-				if sel = '0' then ram_even(ia) <= data_a;
-				else              ram_odd(ia)  <= data_a;
-				end if;
-			end if;
-			if wren_b = '1' then
-				ram_even(ib) <= data_b(3 downto 0);
-				ram_odd(ib)  <= data_b(7 downto 4);
-			end if;
-
-			-- ---- lectures, ecriture prioritaire par port -----------------
-			if wren_a = '1' then
-				q_a_r <= data_a;
-			elsif sel = '0' then
-				q_a_r <= ram_even(ia);
-			else
-				q_a_r <= ram_odd(ia);
-			end if;
-
-			if wren_b = '1' then
-				q_b_r <= data_b;
-			else
-				q_b_r <= ram_odd(ib) & ram_even(ib);
-			end if;
+			if wren_a = '1' and sel = '0' then ram_even(ia) := data_a; end if;
+			qae <= ram_even(ia);
 		end if;
 	end process;
 
-	q_a <= q_a_r;
-	q_b <= q_b_r;
+	EVEN_B : process (clock) begin
+		if rising_edge(clock) then
+			if wren_b = '1' then ram_even(ib) := data_b(3 downto 0); end if;
+			qbe <= ram_even(ib);
+		end if;
+	end process;
+
+	ODD_A : process (clock) begin
+		if rising_edge(clock) then
+			if wren_a = '1' and sel = '1' then ram_odd(ia) := data_a; end if;
+			qao <= ram_odd(ia);
+		end if;
+	end process;
+
+	ODD_B : process (clock) begin
+		if rising_edge(clock) then
+			if wren_b = '1' then ram_odd(ib) := data_b(7 downto 4); end if;
+			qbo <= ram_odd(ib);
+		end if;
+	end process;
+
+	-- Le modele est write-first : apres une ecriture, la lecture rend deja la
+	-- nouvelle donnee. C'est exactement l'ecriture prioritaire de l'original, sans
+	-- avoir a la recreer par un contournement.
+	SEL_R : process (clock) begin
+		if rising_edge(clock) then sel_d <= sel; end if;
+	end process;
+
+	q_a <= qao when sel_d = '1' else qae;
+	q_b <= qbo & qbe;
 end inferred;

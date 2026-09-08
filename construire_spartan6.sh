@@ -2,7 +2,8 @@
 # construire_spartan6.sh — SYS80 (GottFA80_PLuS) sur XC6SLX9, chaine ISE 14.7.
 #
 #   sh construire_spartan6.sh [repertoire] [generics...]
-#   ex :  sh construire_spartan6.sh /tmp/fit_hybride "esp_sound=false hybrid=true"
+#   ex :  sh construire_spartan6.sh /tmp/fit_nor        "use_sd=false"
+#   ex :  sh construire_spartan6.sh /tmp/fit_hybride    "use_sd=false esp_sound=false hybrid=true"
 #
 # POURQUOI CE FICHIER EXISTE. Les bitstreams Spartan-6 livres jusqu'ici
 # (gottfa-bitstreams/spartan6/*.svf) n'etaient reconstructibles par PERSONNE :
@@ -29,7 +30,13 @@ X=$ISE/ISE/bin/lin64
 
 R=$(cd "$(dirname "$0")" && pwd)
 D=${1:-/tmp/sys80_spartan}
-GEN=${2:-}
+# use_sd=false N'EST PAS OPTIONNEL SUR CETTE CIBLE. La carte Smart FA n'a pas de
+# carte SD -- CS_SDcard/P56 n'atteint aucun composant (cf. SYS80.vhd, commentaire de
+# NOR_CS_FPGA) -- mais le generic du source vaut `true`. Construire « avec les defauts »
+# donne un design qui attend une SD absente, ne relache JAMAIS reset_l et reste
+# TOTALEMENT MUET, alors que la LED de configuration dit qu'il est programme. Piege paye
+# deux fois le 2026-09-05. Le defaut du script est donc NOR, et non « les defauts du source ».
+GEN=${2:-use_sd=false}
 UCF=${UCF:-$R/GottFA80_SLX9.ucf}
 COMPOSANT=xc6slx9-2-tqg144
 TOP=SYS80

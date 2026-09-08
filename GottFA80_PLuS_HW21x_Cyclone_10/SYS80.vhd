@@ -34,6 +34,43 @@ entity SYS80 is
 		-- set false to recover ~522 LEs on a tight device; the shared-bus
 		-- muxes then constant-fold back to the stock SD/EEPROM behaviour.
 		lisy_enable : boolean := true;
+		-- Chemin de la ligne de demande P141 (FA_CTRL_REQ). Isolable : c'est la seule
+		-- modification du 2026-09-07 qui touche a de la logique VUE PAR LE JEU
+		-- (`lisy_active`). Le mettre a false rend le design identique a celui du
+		-- 5 septembre de ce cote, sans toucher au reste, pour bissecter en un build.
+		ctrl_line_en : boolean := true;
+		-- OBSERVER SANS BRANCHER. Avec ctrl_line_en=false et ctrl_line_obs=true, le
+		-- tampon d'entree de P141 existe et n'alimente QUE la balise : `lisy_active`
+		-- ne le voit jamais. Si la machine deraille quand meme, la faute vient de la
+		-- presence du tampon (physique) ; si elle est saine, elle vient du chemin
+		-- logique. Un seul build separe les deux.
+		ctrl_line_obs : boolean := false;
+		-- Poids de GOSOF80 dans le melangeur hybride. 64 = plein niveau (GOSOF80 sort
+		-- du 8 bits, l'ESP du 14 : le facteur 64 remet les deux a la meme echelle),
+		-- 32 = -6 dB, 16 = -12 dB. C'est le SEUL chiffre qui regle l'equilibre voix /
+		-- bruitages : le chemin de la voix est deja a pleine echelle (mesure du
+		-- 2026-09-07 : gain par voix = 255 des volv=100, donc rien a gagner cote ESP).
+		-- Sorti en generic pour se regler d'une reconstruction, sans editer le source.
+		gosof_gain : integer := 32;
+		-- Poids de la VOIX de l'ESP, en seiziemes : 16 = unite, 24 = +3,5 dB, 32 = +6 dB.
+		-- Il existe parce que `volv` cote ESP ne peut PAS monter : le gain par voix y
+		-- vaut deja 255 (le maximum) des 100 % -- mesure du 2026-09-07. La marge est
+		-- ici, dans le melangeur : les fichiers de parole cretent a -3,6 dB du plein
+		-- niveau (mesure ffmpeg), donc ~3 a 5 dB sont disponibles avant que la
+		-- saturation du melangeur ne morde. Au-dela elle mord -- proprement, elle
+		-- borne aux rails plutot que de reboucler, mais elle mord.
+		esp_gain : integer := 16;
+		-- Alterner a CHAQUE gravure (0/1) : la balise le renvoie, et on sait alors
+		-- si le FPGA a bien recharge U5. Sans ce bit, « ca ne change rien » ne se
+		-- distingue pas de « la gravure n'a pas pris ».
+		build_tag : integer := 0;
+		-- Espion du port lampes : il occupe le canal de l'INSTANTANE MEMOIRE
+		-- (snap_data/req/ack). Les deux ne peuvent pas coexister -- avec l'espion,
+		-- /api/ramsnap rend « error ». Eteint par defaut : l'instantane, qui donne
+		-- la RAM CMOS et donc les REGLAGES du jeu, vaut mieux au quotidien.
+		lamp_snoop_en : boolean := false;
+		-- Passe a GOSOF80 : coupe le generateur de sons d'attract (voir la-bas).
+		attract_snd_off : boolean := false;
 		-- Chemin de chargement du jeu. JP1 coupe sur cette carte => le FPGA n'a
 		-- plus acces a la NOR, qui reste a l'ESP. On charge donc depuis la SD
 		-- branchee sur P4 (CS_SDcard=P4.15 + le bus MOSI/MISO/CLK). Une seule
@@ -54,6 +91,13 @@ entity SYS80 is
 		-- the sound_link UART feeds the ESP, which plays only speech + complex-80B (sndmode=hybrid
 		-- on the ESP, per sndroute). Off by default => stock/esp_sound builds are unchanged.
 		hybrid      : boolean := false;
+		-- 🔴 FAUX PAR DEFAUT, ET C'EST DELIBERE. Mettre sound_link sur le fil de l'ESP
+		-- (P142) NOIE LE CANAL OU LISY LIT SES REPONSES : mesure du 2026-09-05 sur la
+		-- machine, « Control denied (Code 243) » ou 243 = 0xF3 est un jeton de
+		-- sound_link. Ralentir le battement de coeur de 50 ms a 1 s n'a PAS suffi --
+		-- le probleme n'est pas le debit, c'est le partage lui-meme. Tant qu'aucun
+		-- autre fil n'est disponible, le fil de l'ESP ne porte que la balise.
+		snd_link_on_esp : boolean := false;
 		-- ===================================================================
 		-- 80B DIAGNOSTIC TEXT DISPLAY (disp80b_diag) -- MEASURED COST, 2026-07-27.
 		--
@@ -111,6 +155,10 @@ entity SYS80 is
 		CS_SDcard	: 	buffer 	std_logic;
 		NOR_CS_FPGA	: 	buffer 	std_logic;   -- /CS de U6 (NOR des jeux), P35 via JP1 -- Pstore
 		esp_link_tx	: 	out 	std_logic;   -- beacon jeu/FP vers l'ESP, P142 -> GPIO18 -- Pstore
+		-- Demande de prise de controle par l'ESP : GPIO21 (FA_CTRL_REQ) -> P141, ACTIF BAS
+		-- (BOARD_CTRL_ACTIVE_LEVEL = 0 dans board_pins_smartfa.h). C'est un NIVEAU, pas une
+		-- trame : FA_Control le pose et le retire, et sa disparition rend la main.
+		esp_ctrl_req_n : in std_logic := '1';
 		CS_EEprom	: 	buffer 	std_logic;
 		MOSI			: 	inout 	std_logic;  -- lisyctrl: inout for shared-bus slave mode
 		MISO			: 	inout 	std_logic;
@@ -386,6 +434,69 @@ signal wr_soundrom2		: std_logic;
 
 -- ===== lisyctrl diagnostic bridge (added) =====
 signal lisy_active : std_logic := '0';
+-- `esp_ctrl_req_n` vient d'une autre carte, sur un fil qui n'est pas synchrone de notre
+-- horloge : deux bascules avant tout usage, sinon un front mal place fait echantillonner
+-- un etat metastable et le mode diagnostic clignoterait.
+signal ctrl_req_s  : std_logic_vector(2 downto 0) := (others => '1');
+-- ARMEMENT DE LA DEMANDE. Le FPGA est configure en ~200 ms, l'ESP met ~1 s a
+-- piloter GPIO21 : entre les deux la ligne n'appartient a personne. Sans garde,
+-- une ligne basse pendant cette fenetre fait entrer la machine en diagnostic DES
+-- L'ALLUMAGE -- 6502 tenu, afficheurs et lampes pilotes par lisyctrl, ce qui se
+-- voit comme un jeu qui delire. On exige donc d'avoir vu la ligne AU REPOS (haut)
+-- au moins une fois avant d'accepter la moindre demande, et qu'elle soit ensuite
+-- basse de facon STABLE (1 ms) pour qu'un parasite ne suffise pas.
+constant ctrl_low_max : integer := 50000;                    -- 1 ms a 50 MHz
+-- 🔴 DELAI D'ARMEMENT APRES LA SORTIE DE RESET. Mesure du 2026-09-07 : la ligne
+-- P141 DESCEND pendant le demarrage (bit collant `ctrl_low_seen` a 1 alors que le
+-- niveau courant est au repos). L'ESP met ~1 s a piloter sa broche ; d'ici la, le
+-- FPGA tenait le 6502 EN PLEINE INITIALISATION. Le diagnostic se refermait ensuite
+-- tout seul -- donc on lisait `diag=0` -- mais le jeu repartait avec une RAM
+-- incoherente : afficheur qui deraille, son bloque, matrice muette. Une cause,
+-- trois symptomes, et un temoin qui dit « rien a signaler » si on le lit trop tard.
+-- Exiger d'avoir vu la ligne au repos NE SUFFIT PAS : le pull-up du FPGA la tient
+-- haute avant que l'ESP demarre, donc l'armement se faisait legitimement, et le
+-- passage bas qui suivait durait bien plus que l'anti-rebond.
+-- Le bon critere n'est pas « la ligne est-elle credible » mais « le jeu a-t-il eu
+-- le temps de demarrer ». 2 s couvrent largement le demarrage de l'ESP.
+constant ctrl_arm_ms  : integer := 2000;
+signal ctrl_pre : integer range 0 to ctrl_low_max-1 := 0;
+signal ctrl_ms  : integer range 0 to ctrl_arm_ms := 0;
+-- Entree effective : la broche, ou un repos permanent quand le chemin est coupe.
+-- Coupe, la chaine entiere (synchroniseur, compteur, branche) se replie sur des
+-- constantes et disparait a la synthese.
+signal ctrl_req_in : std_logic;
+signal ctrl_obs    : std_logic;                       -- vers la balise uniquement
+signal ctrl_obs_s  : std_logic_vector(2 downto 0) := (others => '1');
+signal ctrl_low_seen : std_logic := '0';              -- collant
+signal build_tag_s : std_logic;                       -- etiquette de build (generic)
+-- TEMOINS DE VIE DU 6502 (2026-09-08). `game_running` est un verrou a sens unique
+-- (255 IRQ puis plus jamais) : il ne distingue pas un CPU qui tourne d'un CPU fige.
+-- `cpu_alive`  : un front d'IRQ dans les 100 dernieres ms (l'ISR tourne).
+-- `io_alive`   : le port lampes U6 PB a change dans les 100 dernieres ms (la boucle
+--                principale ecrit le plateau). Boucle bloquee = irq=1, io=0.
+signal vie_irq_d : std_logic := '1';
+signal vie_pb_d  : std_logic_vector(7 downto 0) := (others => '0');
+signal irq_age, pb_age : integer range 0 to 5000000 := 5000000;   -- 100 ms a 50 MHz
+signal cpu_alive_s, io_alive_s : std_logic;
+-- ESPION DU PORT LAMPES (2026-09-08). Les temoins disent que le 6502 ecrit le port
+-- lampes en continu pendant un attract au plateau noir : il faut VOIR ce qu'il
+-- ecrit. Chaque changement de U6 PB (colonne 7..4, donnee 3..0) part sur le lien
+-- en deux quartets 0xC0|haut, 0xD0|bas -- les jetons d'instantane, inutilises
+-- sur ce module (disp_inject y est mort) -- lisibles dans /api/rxdump.
+-- Echantillonne : un changement survenu pendant l'envoi du precedent est perdu,
+-- ce qui suffit pour lire le MOTIF (colonne/donnee) sinon la cadence.
+signal lamp_snoop_v : std_logic_vector(7 downto 0) := (others => '0');
+signal lamp_snoop_d : std_logic_vector(7 downto 0) := (others => '0');
+signal lamp_data_s  : std_logic_vector(7 downto 0) := (others => '0');
+signal lamp_req_s   : std_logic := '0';
+signal lamp_ack_s   : std_logic := '0';
+signal lamp_ph      : integer range 0 to 2 := 0;   -- 0 repos, 1 quartet haut envoye ?, 2 bas
+signal lamp_gap     : integer range 0 to 1000000 := 0;   -- limiteur de cadence
+signal lamp_ack_d   : std_logic := '0';                 -- pour detecter le FRONT d'acquittement
+signal snap_mux_data : std_logic_vector(7 downto 0);
+signal snap_mux_req  : std_logic;
+signal ctrl_armed  : std_logic := '0';
+signal ctrl_low_n  : integer range 0 to ctrl_low_max := 0;
 -- ESP bus grant: the companion pulls the board reset line (S8.2) low to take the
 -- shared SPI bus (NOR/SD/EEPROM programming). Needed because outside diag the FPGA
 -- always drives MOSI/CLK, so holding reset alone never freed the bus.
@@ -409,7 +520,18 @@ signal dinj_ctrl2 : std_logic_vector(6 downto 0);  -- CONTROL2 0xFD flags from t
 signal lisy_by_esp : std_logic := '0';             -- diag mode was entered by the ESP, not by the door switch
 signal lisy_sound5     : std_logic_vector(4 downto 0);  -- lisyctrl sound code -> gosof80
 signal lisy_sound_trig : std_logic;                     -- lisyctrl sound trigger -> gosof80
-signal sl_tx           : std_logic;                     -- sound_link UART (ESP sound mode)
+signal sl_tx           : std_logic := '1';              -- sound_link UART (ESP sound mode)
+-- Balise de jeu remise a sound_link : il n'y a qu'UN fil vers l'ESP (P142).
+signal bcn_frame_s     : std_logic_vector(31 downto 0); -- 4 octets, octet 0 en poids faible
+signal bcn_req_s       : std_logic;
+signal bcn_ack_s       : std_logic;
+signal beacon_tx_s     : std_logic := '1';              -- UART propre a la balise (builds sans sound_link)
+-- Melange audio du mode hybride : la carte n'a qu'UN etage audio (P44 -> RC -> TDA7267),
+-- donc GOSOF80 et la voix de l'ESP doivent etre sommes AVANT un unique modulateur.
+signal gosof_pcm       : std_logic_vector(7 downto 0);  -- PCM de GOSOF80, 0x80 = silence
+signal gosof_dsm       : std_logic;                     -- son modulateur interne (build non hybride)
+signal esp_pcm         : std_logic_vector(13 downto 0); -- PCM de l'ESP, 14 bits, 0x2000 = silence
+signal mix_pcm         : std_logic_vector(13 downto 0) := "10" & x"000";
 signal ball_val        : std_logic_vector(3 downto 0) := "0000";  -- snooped $0072 = GAME IN PROGRESS (0=attract, 1=game); powers up 0 = attract
 -- RAM-snapshot streamer (ram_snoop -> sound_link injection port). Diagnostic only:
 -- mirrors CPU writes to the three RIOT RAMs *and* to the 5101 CMOS RAM, and streams
@@ -888,7 +1010,20 @@ port map(
 -- Le FPGA dit a l'ESP ce qu'il a charge : numero de jeu, free-play, famille,
 -- 6502 vivant. Le fil (P142 -> GPIO18) etait cable au PCB depuis toujours ;
 -- c'est la premiere fois que l'entite s'en sert. -- Pstore
+-- 2026-09-05 -- LA BALISE NE TIENT PLUS LE FIL TOUTE SEULE.
+-- Elle le monopolisait, si bien que les commandes son de sound_link n'atteignaient
+-- JAMAIS le decodeur : elles sortaient sur `Debug` (P46), que fpgalink n'ecoutait pas.
+-- ⚠️ CORRECTION 2026-09-07 : `Debug` ne va PAS « nulle part ». Netliste : P4.11 + U1.46
+--    + U7.36 = RXD0 de l'ESP (GPIO44). L'octet arrivait donc sur l'UART0 de l'ESP --
+--    inutilisable sous FA_Control, dont la CONSOLE est sur cet UART0, mais libre sous
+--    le firmware Arduino (console sur USB CDC). Le choix de tout passer par P142 reste
+--    valable ; il n'etait simplement pas le seul. Mesure sur la machine : P142 ne
+--    portait que 0xFA/0x09 et
+-- `payload=0` -- aucune commande son en 2876 octets. Quand esp_sound est vrai,
+-- la balise REMET donc sa trame a sound_link, seul emetteur du fil, qui la pousse
+-- en 4 octets atomiques. Sans sound_link (esp_sound = false) elle garde son UART.
 BEACON: entity work.game_beacon
+generic map( own_uart => not (snd_link_on_esp and (esp_sound or hybrid)) )
 port map(
 	clk          => clk_50,
 	gnum         => gnum,
@@ -897,8 +1032,78 @@ port map(
 	is_80B       => is_80B,
 	is_80A       => is_80A,
 	reset_l      => reset_l,
-	tx           => esp_link_tx
+	diag_esp     => lisy_by_esp,
+	ctrl_lvl     => cpu_alive_s,      -- b5 : IRQ vivante (100 ms)   [remplace le niveau P141]
+	ctrl_low_seen=> io_alive_s,       -- b6 : lampes ecrites (100 ms) [remplace le collant P141]
+	build_tag    => build_tag_s,
+	tx           => beacon_tx_s,
+	frame        => bcn_frame_s,
+	req          => bcn_req_s,
+	ack          => bcn_ack_s
 );
+
+-- Le seul fil FPGA -> ESP (P142 -> GPIO18).
+GEN_LINK_SND : if esp_sound generate
+	esp_link_tx <= sl_tx;          -- son + jeu + balise, un seul emetteur
+end generate GEN_LINK_SND;
+-- ===========================================================================
+-- ETAGE AUDIO : UN SEUL MODULATEUR POUR TOUTE LA CARTE.
+-- La porteuse n'a qu'une voie audio (P44 -> RC 3k3/4n7 -> TDA7267) et le module
+-- Smart FA n'en a aucune. Deux sources ne peuvent donc pas avoir chacune son
+-- modulateur : il faut sommer les ECHANTILLONS et n'en moduler qu'un.
+--   esp_sound          : la voix de l'ESP seule (GOSOF80 absent du build)
+--   hybride            : GOSOF80 + voix de l'ESP, SOMMES ici
+--   ni l'un ni l'autre : GOSOF80 seul, son propre modulateur suffit
+-- ===========================================================================
+GEN_SND_PLAIN : if (not esp_sound) and (not hybrid) generate
+	Sound <= gosof_dsm;
+end generate GEN_SND_PLAIN;
+
+GEN_SND_MIX : if (not esp_sound) and hybrid generate
+	-- La voix arrive par le meme fil qu'en esp_sound (ESP GPIO47 -> P143), mais on
+	-- ne prend que son ECHANTILLON : son modulateur reste inutilise.
+	ESP_VOIX : entity work.audio_uart
+	generic map ( CLK_HZ => 50000000, BAUD => 441000, SILENCE_MS => 50 )
+	port map ( clk => clk_50, reset_n => reset_sw_stable, rx => esp_audio_rx,
+	           audio_o => open, pcm_o => esp_pcm, active => open );
+
+	-- Somme autour de la mi-echelle (0x80 = silence des deux cotes), avec
+	-- SATURATION : deux sources a plein niveau depasseraient, et un debordement
+	-- s'entendrait comme un claquement, pas comme une saturation douce.
+	-- EQUILIBRE DES DEUX SOURCES -- LA CONSTANTE A REGLER A L'OREILLE.
+	-- GOSOF80 sort du 8 bits, l'ESP du 14 bits : le facteur 64 remet le premier a
+	-- la meme echelle. Ecoute du 2026-09-05 : « les bruitages sont revenus un peu
+	-- haut en volume » -> 32 au lieu de 64, soit -6 dB sur GOSOF80 seul. C'est le
+	-- SEUL chiffre a toucher pour rejouer cet equilibre.
+	MIX : process (clk_50)
+		constant GAIN_GOSOF : integer := gosof_gain; -- generic : 64 = plein, 32 = -6 dB, 16 = -12 dB
+		constant GAIN_ESP   : integer := esp_gain;   -- generic : 16 = unite, 24 = +3,5 dB
+		variable t : integer range -262144 to 262143;
+	begin
+		if rising_edge(clk_50) then
+			t := (to_integer(unsigned(gosof_pcm)) - 128) * GAIN_GOSOF
+			   + ((to_integer(unsigned(esp_pcm)) - 8192) * GAIN_ESP) / 16
+			   + 8192;
+			if    t <     0 then t :=     0;
+			elsif t > 16383 then t := 16383;
+			end if;
+			mix_pcm <= std_logic_vector(to_unsigned(t, 14));
+		end if;
+	end process;
+
+
+	MIX_DAC : entity work.dac
+	generic map ( msbi_g => 13 )
+	port map ( clk_i => clk_50, res_n_i => reset_sw_stable,
+	           dac_i => mix_pcm, dac_o => Sound );
+end generate GEN_SND_MIX;
+
+GEN_LINK_HYB : if hybrid and not esp_sound generate
+	esp_link_tx <= sl_tx;          -- hybride : SND_LINK_H tient le fil, balise comprise
+end generate GEN_LINK_HYB;
+GEN_LINK_BCN : if not (esp_sound or hybrid) generate
+	esp_link_tx <= beacon_tx_s;    -- pas de sound_link dans ce build : balise seule
+end generate GEN_LINK_BCN;
 
 -- RIOT IRQ outputs all assert CPU IRQ input
 cpu_irq_n <= U4_irq_n and U5_irq_n and U6_irq_n;		
@@ -962,16 +1167,95 @@ U4_PB     <= lisy_u4pb when lisy_active = '1' else u4_pb_cpu;
 --      frozen CPU.
 -- lisy_by_esp remembers which door was used, so an ESP that goes quiet cannot
 -- cancel a diag session the operator started at the door switch.
+ctrl_req_in <= esp_ctrl_req_n when ctrl_line_en else '1';
+ctrl_obs    <= esp_ctrl_req_n when (ctrl_line_en or ctrl_line_obs) else '1';
+build_tag_s <= '1' when build_tag /= 0 else '0';
+snap_mux_data <= lamp_data_s when lamp_snoop_en else snap_data_s;
+snap_mux_req  <= lamp_req_s  when lamp_snoop_en else snap_req_s;
+P_VIE : process begin
+	wait until rising_edge(clk_50);
+	vie_irq_d <= cpu_irq_n;
+	if vie_irq_d /= cpu_irq_n then irq_age <= 0; elsif irq_age /= 5000000 then irq_age <= irq_age + 1; end if;
+	vie_pb_d <= u6pb_src;
+	if vie_pb_d /= u6pb_src then pb_age <= 0; elsif pb_age /= 5000000 then pb_age <= pb_age + 1; end if;
+end process;
+cpu_alive_s <= '1' when irq_age /= 5000000 else '0';
+P_LAMP_SNOOP : process begin
+	wait until rising_edge(clk_50);
+	lamp_snoop_d <= u6pb_src;
+	lamp_ack_d   <= lamp_ack_s;
+	if lamp_gap /= 0 then lamp_gap <= lamp_gap - 1; end if;
+	case lamp_ph is
+		when 0 =>
+			-- 🔴 N'EMETTRE QUE SUR CHANGEMENT DE COLONNE, ET AU PLUS ~50 FOIS/s.
+			-- La premiere version declenchait sur tout changement du port : la
+			-- donnee bouge en continu, ce qui a NOYE le lien (5 000 octets/s de
+			-- 0xC0, plus de son ni de balise lisibles -- mesure du 2026-09-08).
+			-- Un espion qui sature la voie qu'il observe ne mesure plus rien.
+			if lamp_snoop_d(7 downto 4) /= u6pb_src(7 downto 4)
+			   and lamp_gap = 0 and lisy_active = '0' then
+				lamp_snoop_v <= u6pb_src;
+				lamp_data_s  <= "1100" & u6pb_src(7 downto 4);   -- 0xC0 | colonne
+				lamp_req_s   <= '1'; lamp_ph <= 1; lamp_gap <= 1000000;   -- 20 ms a 50 MHz
+			end if;
+		-- 🔴 AVANCER SUR LE FRONT DE L'ACQUITTEMENT, PAS SUR SON NIVEAU.
+		-- `snap_ack` dure un temps-bit entier ; a 50 MHz les deux etats le
+		-- voyaient dans la MEME impulsion et on relachait avant que le second
+		-- quartet parte : on ne voyait que des 0xC0, jamais de 0xD0
+		-- (mesure du 2026-09-08).
+		when 1 =>
+			if lamp_ack_s = '1' and lamp_ack_d = '0' then
+				lamp_data_s <= "1101" & lamp_snoop_v(3 downto 0);  -- 0xD0 | donnee
+				lamp_ph <= 2;
+			end if;
+		when 2 =>
+			if lamp_ack_s = '1' and lamp_ack_d = '0' then
+				lamp_req_s <= '0'; lamp_ph <= 0;
+			end if;
+	end case;
+end process;
+io_alive_s  <= '1' when pb_age  /= 5000000 else '0';
+
+-- Observation pure : synchronisation + memoire collante du moindre passage bas.
+P_CTRL_OBS : process begin
+	wait until rising_edge(clk_50);
+	ctrl_obs_s <= ctrl_obs_s(1 downto 0) & ctrl_obs;
+	if ctrl_obs_s(2) = '0' then ctrl_low_seen <= '1'; end if;
+end process;
+
 GEN_LISY: if lisy_enable generate
 LISY_MODE: process begin
 	wait until rising_edge(clk_50);
+	ctrl_req_s <= ctrl_req_s(1 downto 0) & ctrl_req_in;
+	-- Compteur de millisecondes depuis la sortie de reset (voir ctrl_arm_ms).
+	if ctrl_pre = ctrl_low_max-1 then
+		ctrl_pre <= 0;
+		if ctrl_ms /= ctrl_arm_ms then ctrl_ms <= ctrl_ms + 1; end if;
+	else
+		ctrl_pre <= ctrl_pre + 1;
+	end if;
+	-- Armement : le jeu tourne depuis assez longtemps ET la ligne est au repos.
+	if ctrl_ms = ctrl_arm_ms and ctrl_req_s(2) = '1' then ctrl_armed <= '1'; end if;
+	-- Anti-rebond, mais SEULEMENT une fois arme : sinon le passage bas du
+	-- demarrage saturerait le compteur et declencherait des l'armement.
+	if ctrl_armed = '0' or ctrl_req_s(2) = '1' then
+		ctrl_low_n <= 0;
+	elsif ctrl_low_n /= ctrl_low_max then
+		ctrl_low_n <= ctrl_low_n + 1;
+	end if;
 	if reset_l = '0' then
 		lisy_active <= '0';
 		lisy_by_esp <= '0';
+		ctrl_armed  <= '0';                      -- un reset redemande la preuve
+		ctrl_low_n  <= 0;
+		ctrl_pre    <= 0;
+		ctrl_ms     <= 0;
 	elsif lisy_trig = '1' then
 		lisy_active <= '1';
 		lisy_by_esp <= '0';
-	elsif dinj_ctrl2(0) = '1' then
+	elsif dinj_ctrl2(0) = '1' or (ctrl_armed = '1' and ctrl_low_n = ctrl_low_max) then
+		-- Deux sources equivalentes : le jeton CONTROL2 de disp_inject (carte prototype)
+		-- et la ligne de demande FA_CTRL_REQ (module Smart FA, seule cablee ici).
 		lisy_active <= '1';
 		lisy_by_esp <= '1';
 	elsif lisy_by_esp = '1' then
@@ -1684,7 +1968,23 @@ segments_80(24) <= not U5_pb_out(6);
 --------------------------------------------------
 U6_PA(4 downto 0) <= not u6pa_masked(4 downto 0) when (game_running='1' or lisy_active='1') else "00000"; --sound AND Z31 (via tourney_block)
 U6_PA(7 downto 5) <= u6pa_masked(7 downto 5) when (game_running='1' or lisy_active='1') else "111"; -- decoder enable and Sol9
-U6_PB(3 downto 0) <= not u6pb_src(3 downto 0) when (game_running='1' or lisy_active='1') else "1111"; -- thunk prevention (inverter)
+-- 🔴 MEME GARDE QUE L'ADRESSE, ET C'EST LE POINT. Les deux moities de ce port
+-- etaient gardees differemment : l'ADRESSE de colonne (7..4) sort des reset_l='1',
+-- la DONNEE (3..0) restait forcee a « tout eteint » jusqu'a game_running='1'.
+-- Or game_running n'est pas reset_l : count_to_zero ne le verrouille qu'apres
+-- 255 FRONTS D'IRQ (cf. son commentaire : « It is a CPU booted flag »). Pendant
+-- cette fenetre la ROM fait sa passe d'initialisation et balaie TOUTES ses
+-- colonnes de lampes : l'adresse passait, la donnee valait zero, donc CHAQUE
+-- bascule de la carte driver etait verrouillee a zero. Ensuite la ROM ne reecrit
+-- une colonne que si elle la croit changee -- en attract elle n'anime que ses
+-- 2-3 lampes de repos, et tout le reste du plateau restait eteint A VIE.
+-- En partie tout marchait, parce que la ROM y reecrit sans cesse chaque colonne.
+-- Symptome mesure sur Volcano le 2026-09-07 ; defaut d'origine, d'ou son
+-- independance a la version du bitstream.
+-- Garder la donnee en laissant passer l'adresse est PIRE que de ne rien garder :
+-- ca n'empeche rien, ca EFFACE. La protection anti-thunk qui compte -- celle des
+-- bobines -- reste sur U6_PA (Sol9 et l'autorisation du decodeur), inchangee.
+U6_PB(3 downto 0) <= not u6pb_src(3 downto 0) when (reset_l='1' or lisy_active='1') else "1111"; -- thunk prevention (inverter)
 U6_PB(7 downto 4) <= u6pb_src(7 downto 4) when (reset_l='1' or lisy_active='1') else lamp_ds; -- thunk prevention 
 	
 -- cpu clock 892Khz
@@ -2011,13 +2311,16 @@ fam_code <= "10" when is_80B = '1' else "01" when is_80A = '1' else "00";
 
 GEN_FPGA_SND : if not esp_sound generate
 SOUNDBOARD: entity work.gosof80
-port map(
+generic map( attract_snd_off => attract_snd_off )
+	port map(
+		
 		clk_50	=> clk_50,
 		cpu_clk  => cpu_clk,
 		reset_l	=> reset_l,
 		game_running => game_running,
 		test	=> '1', --myTest,
-		Audio_O	=> sound,
+		Audio_O	=> gosof_dsm,
+		Audio_PCM => gosof_pcm,
 		
 		-- Sound input S1,S2,S4,S8,S16
 		-- initial low due to 2803A on input of Gosof80
@@ -2089,6 +2392,14 @@ port map(
 );
 
 SND_LINK : entity work.sound_link
+-- ⚠️ BATTEMENT DE COEUR A 1 s, ET NON 50 ms (defaut du module).
+-- Le meme fil porte les REPONSES de LISY. A 50 ms, la re-annonce des jetons de
+-- niveau (mode, partie, disp_inject, radio) produit ~80 octets/s : LISY vidait son
+-- tampon, lisait un octet, et tombait sur un jeton de son au lieu de sa reponse
+-- -- mesure du 2026-09-05, « Control denied (Code 243) », 243 = 0xF3 = jeton
+-- « partie en cours ». Avant l'arbitre, ce fil ne portait que la balise, 8 octets/s.
+-- A 1 s on retombe a ~12 octets/s, et l'ESP se resynchronise toujours largement.
+generic map( hb_ms => 1000 )
 port map(
 	clk => clk_50, rst => not reset_l,
 	diag => lisy_active,
@@ -2097,6 +2408,13 @@ port map(
 	snd_stb => snd_stb,
 	snd_rel => snd_rel,
 	fam  => fam_code,                                 -- 0xF4 | fam (00=80 01=80A 10=80B)
+	-- S1-6 : le SEUL moyen de couper le WiFi en clientele sans deposer la carte.
+	-- Meme polarite que toutes les autres options : DIP FERME = '0' = actif, donc
+	-- wifi_off = not game_option(6). Ouvert (defaut d'usine) = radio autorisee, pour
+	-- qu'une carte livree garde ses mises a jour. L'option 5 n'etait PAS disponible :
+	-- c'est la trappe de secours famille (« if the glass is the wrong type, close
+	-- S1-5 »), et la prendre priverait l'exploitant de son seul recours.
+	wifi_off => not game_option(6),
 	-- FIXED 2026-07-27: this was RAW `game_select`, i.e. the INVERTED DIP value,
 	-- while every other consumer of the game number (nor_flash `selection`,
 	-- GOSOF80 `game_sel`, EEprom `selection`, and the boot banner via
@@ -2115,8 +2433,15 @@ port map(
 	snap_data => snap_data_s,                         -- RAM snapshot frame (0xBF + 1280 nibble bytes)
 	snap_req  => snap_req_s,
 	snap_ack  => snap_ack_s,
+	bcn_frame => bcn_frame_s,                         -- balise remise par game_beacon
+	bcn_req   => bcn_req_s,
+	bcn_ack   => bcn_ack_s,
 	tx => sl_tx
 );
+-- Retour d'acquittement vers ram_snoop. L'instance qui le fournissait
+-- (GEN_ESP_SND) n'est pas generee en hybride : sans cette ligne, snap_ack_s
+-- reste flottant et l'instantane memoire ne repart jamais.
+snap_ack_s <= lamp_ack_s when not lamp_snoop_en else '0';
 Debug    <= sl_tx;
 -- Audio_RX/PIN_2 is now an INPUT (ESP GPIO9 display-inject UART TX is wired to it).
 -- L'ETAGE AUDIO DE LA PORTEUSE, RENDU A L'ESP.
@@ -2127,7 +2452,7 @@ Debug    <= sl_tx;
 -- Le debit de l'UART fixe seul la frequence d'echantillonnage (BAUD/10 en 8N1),
 -- donc il n'y a ni FIFO, ni horloge locale, ni derive a rattraper.
 ESP_AUDIO : entity work.audio_uart
-generic map ( CLK_HZ => 50000000, BAUD => 220500, SILENCE_MS => 50 )
+generic map ( CLK_HZ => 50000000, BAUD => 441000, SILENCE_MS => 50 )
 port map (
 	clk     => clk_50,
 	reset_n => reset_sw_stable,
@@ -2143,6 +2468,14 @@ end generate GEN_ESP_SND;
 -- belong to GOSOF80). `and not esp_sound` guards against a both-true misconfig (no double Debug).
 GEN_HYB_LINK : if hybrid and not esp_sound generate
 SND_LINK_H : entity work.sound_link
+-- ⚠️ BATTEMENT DE COEUR A 1 s, ET NON 50 ms (defaut du module).
+-- Le meme fil porte les REPONSES de LISY. A 50 ms, la re-annonce des jetons de
+-- niveau (mode, partie, disp_inject, radio) produit ~80 octets/s : LISY vidait son
+-- tampon, lisait un octet, et tombait sur un jeton de son au lieu de sa reponse
+-- -- mesure du 2026-09-05, « Control denied (Code 243) », 243 = 0xF3 = jeton
+-- « partie en cours ». Avant l'arbitre, ce fil ne portait que la balise, 8 octets/s.
+-- A 1 s on retombe a ~12 octets/s, et l'ESP se resynchronise toujours largement.
+generic map( hb_ms => 1000 )
 port map(
 	clk => clk_50, rst => not reset_l,
 	diag => lisy_active,
@@ -2152,8 +2485,19 @@ port map(
 	fam  => fam_code,
 	game => gnum,                                     -- true game number, see SND_LINK above
 	game_running => game_running,                     -- tournament auto-timer (0xF2/0xF3 to ESP)
+	wifi_off  => not game_option(6),                  -- S1-6, comme en esp_sound
+	snap_data => snap_mux_data,                       -- espion lampes OU instantane RAM
+	snap_req  => snap_mux_req,
+	snap_ack  => lamp_ack_s,
+	bcn_frame => bcn_frame_s,                         -- balise remise par game_beacon
+	bcn_req   => bcn_req_s,
+	bcn_ack   => bcn_ack_s,
 	tx => sl_tx
 );
+-- 2026-09-05 : ce bloc envoyait sl_tx sur `Debug` (P46 = P4.11 ET RXD0 de l'ESP, GPIO44),
+-- que le decodeur n'ecoutait pas -- le defaut corrige dans GEN_ESP_SND, laisse ici par oubli.
+-- Le fil vers l'ESP est esp_link_tx (P142), pris par GEN_LINK_HYB ci-dessus. `Debug`
+-- reste une pointe de touche pour l'oscilloscope, pas un chemin vers l'ESP.
 Debug <= sl_tx;
 end generate GEN_HYB_LINK;
  	

@@ -8,13 +8,26 @@ use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
 entity gosof80 is
-	port(
+	generic(
+		-- Force num_sounds a 0 pour TOUS les jeux : le generateur de sons d'attract
+		-- reste alors au repos. Test causal du 2026-09-08 : l'attract du PLATEAU est
+		-- casse EXACTEMENT sur les jeux ou nu_attr_s /= 0 (Mars 3, Volcano 3,
+		-- Black Hole 2) et intact la ou il vaut 0 (Devil's Dare, Rocky, Volcano 13).
+		attract_snd_off : boolean := false
+	);
+	port (
 		clk_50	: in std_logic;
 		cpu_clk	: in std_logic;
 		reset_l	: in std_logic;
 		game_running	: in std_logic;
 		test		: in std_logic := '1';
 		Audio_O	: buffer std_logic;
+		-- Le MEME echantillon, AVANT le modulateur delta-sigma interne. Sur la carte
+		-- Smart FA il n'y a qu'UN seul etage audio (P44 -> RC -> TDA7267) : en mode
+		-- hybride, GOSOF80 et la voix de l'ESP doivent donc etre SOMMES avant un
+		-- unique modulateur, sinon l'un des deux n'a aucun chemin vers le haut-parleur.
+		-- Non signe, 0x80 = silence, meme convention que audio_uart.
+		Audio_PCM : out std_logic_vector(7 downto 0);
 		
 		-- Sound input S1,S2,S4,S8,S16
 		Sound_Meta :	in 	std_logic_vector(4 downto 0);
@@ -111,6 +124,7 @@ architecture rtl of gosof80 is
 	signal attract_sound	:  std_logic_vector(7 downto 0);
 	signal attract_send_flag	:  std_logic:='0';	
 	signal nu_attr_s : integer;
+	signal nu_attr_eff : integer;
 	
 		
 begin
@@ -149,6 +163,8 @@ game_number <= to_integer(unsigned(game_sel));
 		end process;	
 	
 
+nu_attr_eff <= 0 when attract_snd_off else nu_attr_s;
+
 Attract_S: entity work.attract
 port map(   			
          clk => clk_50,
@@ -156,7 +172,7 @@ port map(
          rst => reset_l,
 			other_sound => riot_pa_i(7),
 			options => SB_Opt(4) & SB_Opt(3),
-			num_sounds => nu_attr_s,
+			num_sounds => nu_attr_eff,
 			soundnumber => attract_sound,
          send_flag => attract_send_flag
 );
@@ -178,7 +194,13 @@ SC01_Simu: entity work.SC01
 port map(   			
          clk => clk_50,
 			strobe => sc01_strobe,
-			cpu_data => cpu_dout(5 downto 0),
+			-- 🔴 BUS DE PHONEMES INVERSE. La MA-216 porte des inverseurs entre le
+			-- port du 6502 et les entrees P0..P5 du SC-01 : le ROM ecrit donc ses
+			-- phonemes complementes (il fait EOR #$3F). Sans ce `not`, le STOP
+			-- (0x3F) arrive comme 0x00 -- l'index 0 du Votrax, qui est EH3 : la
+			-- puce tient une voyelle au lieu de se taire (le « AAAH »).
+			-- Defaut d'origine, absent aussi de /root/hyb_ay. (2026-09-08)
+			cpu_data => not cpu_dout(5 downto 0),
 			AR => sc01_AR,
          rst => reset_l
 );
@@ -398,6 +420,10 @@ audio_dat <= audio_dat_latch when ( SB_type = is_MA216 or SB_type = is_MA309) el
 				 
 				 
 -- Delta-Sigma audio DAC
+Audio_PCM <= audio_dat;
+
+-- Delta-sigma interne : inutilise en hybride (Audio_O laisse ouvert), le
+-- synthetiseur l'elague alors de lui-meme.
 Audio_DAC : entity work.dac
 generic map(
   msbi_g => 7)

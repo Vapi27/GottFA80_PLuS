@@ -32,6 +32,8 @@ architecture sim of tb_R5101_equiv is
 
 	signal running  : boolean := true;
 	signal cycle, mismatch, compares : natural := 0;
+	signal croise    : std_logic := '0';   -- le port B ecrit la case que A lit
+	signal croise_d1 : std_logic := '0';
 	signal checking : boolean := false;
 begin
 	clk <= not clk after 10 ns when running else '0';
@@ -57,6 +59,9 @@ begin
 						& "  |  B[" & integer'image(to_integer(unsigned(address_b))) & "]"
 						& " orig=" & integer'image(to_integer(unsigned(qb_o)))
 						& " port=" & integer'image(to_integer(unsigned(qb_p)))
+						& "  | wren_a=" & std_logic'image(wren_a)
+						& " wren_b=" & std_logic'image(wren_b)
+						& " croise=" & std_logic'image(croise_d1)
 						severity error;
 				end if;
 			end if;

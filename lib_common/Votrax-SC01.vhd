@@ -62,7 +62,13 @@ use ieee.numeric_std.all;
 							--keep Idle state
 						end if;
 				when Calc => -- we have a valid strobe, calculate time for this phonem
-					duration := time_map(to_integer(signed(cpu_data))) * 60000;			--add 20%, allophones are longer then from datasheet		
+					-- 🔴 UNSIGNED, PAS SIGNED. cpu_data fait 6 bits et time_map est un
+					-- tableau 0 to 63 ; `signed` les interprete de -32 a +31, donc TOUT
+					-- phoneme dont le bit 5 est a 1 -- la moitie du jeu, STOP compris --
+					-- donnait un index NEGATIF, hors bornes. La duree devenait quelconque
+					-- et AR restait a « occupe » : sur MA-216 c'est le NMI du processeur
+					-- son qui ne part jamais, donc la parole qui se fige. (2026-09-08)
+					duration := time_map(to_integer(unsigned(cpu_data))) * 60000;			--add 20%, allophones are longer then from datasheet		
 					state <= Speech;						
 				when Speech =>
 					counter := counter +1;

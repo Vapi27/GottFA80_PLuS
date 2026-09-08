@@ -175,6 +175,14 @@ NET "NOR_CS_FPGA"               LOC = "P35"   | IOSTANDARD = LVCMOS33;   # inter
 # face une entree flottante ferait decoder des octets au hasard, donc du bruit.
 NET "esp_audio_rx"              LOC = "P143" | IOSTANDARD = LVCMOS33 | PULLUP;   # interne   ESP GPIO17 -> audio
 NET "esp_link_tx"               LOC = "P142"  | IOSTANDARD = LVCMOS33;   # interne   beacon jeu/FP -> ESP GPIO18 (UART1 RX)
+# Demande de prise de controle par l'ESP : GPIO21 (FA_CTRL_REQ) -> P141, ACTIF BAS.
+# C'est la SEULE voie cablee sur le module Smart FA pour entrer en mode diagnostic
+# depuis l'interface : `disp_inject` ecoute sur Audio_RX/P41, une broche du CONNECTEUR
+# que l'ESP de ce module n'atteint pas (son commentaire dit « ESP GPIO9 », brochage du
+# PROTOTYPE ; ici GPIO9 est l'horloge de l'OLED). Sans cette ligne, seul l'appui long
+# sur le bouton Test de la porte permet d'entrer en diagnostic -- verifie le 2026-09-05.
+# PULLUP : au repos, ou ESP absent, la ligne doit lire '1' = pas de demande.
+NET "esp_ctrl_req_n"            LOC = "P141" | IOSTANDARD = LVCMOS33 | PULLUP;   # interne   ESP GPIO21 -> demande de controle
 
 #------------------------------------------------------------------------------
 # BROCHES VOLONTAIREMENT NON AFFECTEES

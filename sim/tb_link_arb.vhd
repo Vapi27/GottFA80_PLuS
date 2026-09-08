@@ -208,6 +208,9 @@ begin
     -- per-class byte counters, one per range of the sound_link byte map
     variable n_bytes  : integer := 0;
     variable n_meta   : integer := 0;   -- 0x30 / 0x31
+    variable n_radio : natural := 0;   -- 0xF8/0xF9 etat radio
+    variable n_bcn   : natural := 0;   -- 0xFA balise (+3 octets bruts)
+    variable skip    : natural := 0;   -- octets bruts restant a sauter
     variable n_game   : integer := 0;   -- 0x40..0x7F
     variable n_snd    : integer := 0;   -- 0x80..0x9F
     variable n_ball   : integer := 0;   -- 0xA0..0xAF
@@ -268,7 +271,8 @@ begin
       ---------------------------------------------------------------------
       -- classification against the COMPLETE byte map of sound_link.vhd
       ---------------------------------------------------------------------
-      if    b = x"30" or b = x"31"    then n_meta  := n_meta  + 1;
+      if skip > 0 then skip := skip - 1;          -- octet brut de balise : non classe
+      elsif b = x"30" or b = x"31"    then n_meta  := n_meta  + 1;
       elsif b(7 downto 6) = "01"      then n_game  := n_game  + 1;
       elsif b(7 downto 5) = "100"     then n_snd   := n_snd   + 1;
       elsif b(7 downto 4) = "1010"    then n_ball  := n_ball  + 1;
@@ -281,6 +285,15 @@ begin
       elsif b(7 downto 1) = "1111001" then n_state := n_state + 1;
         if b(0) = '1' then n_f3 := n_f3 + 1; end if;
       elsif b(7 downto 2) = "111101"  then n_fam   := n_fam   + 1;
+      -- 2026-09-05 : deux ajouts a la carte des octets de sound_link.
+      --   0xF8/0xF9 = etat de la radio (DIP d'option S1-6, ferme = coupee).
+      --   0xFA      = balise de jeu, SUIVIE DE 3 OCTETS BRUTS -- seule exception
+      --               a la carte : jeu, drapeaux et somme xor ne portent aucune
+      --               classe. Il faut donc les sauter ici comme le fait
+      --               fpgalink.cpp, sinon la somme (qui peut tomber dans
+      --               0x80..0x9F) serait comptee comme une commande son.
+      elsif b(7 downto 1) = "1111100" then n_radio := n_radio + 1;
+      elsif b = x"FA"                 then n_bcn   := n_bcn   + 1; skip := 3;
       else                                 n_other := n_other + 1;
         report "OCTET HORS CARTE : " & integer'image(to_integer(unsigned(b)))
           severity error;

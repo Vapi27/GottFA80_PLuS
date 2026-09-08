@@ -50,7 +50,22 @@
 -- #                    lib_common/gts_family.vhd (incl. the S1-6 override),   #
 -- #                    so the ESP can name the machine and cross-check the    #
 -- #                    DIPs against the sound map it loaded.                  #
--- #   0xF8 .. 0xFF   FREE (8 codes)                                           #
+-- #   0xFA           BALISE DE JEU : marqueur, SUIVI DE 3 OCTETS BRUTS.       #
+-- #                  C'est la SEULE exception a la carte : les 3 octets qui    #
+-- #                  suivent 0xFA sont des valeurs arbitraires (numero de jeu, #
+-- #                  drapeaux, somme xor) et ne portent AUCUNE classe. Le      #
+-- #                  decodeur de l'ESP DOIT les sauter sans les interpreter -- #
+-- #                  sans quoi la somme de controle, qui peut tomber dans      #
+-- #                  0x80..0x9F, serait lue comme une commande son et          #
+-- #                  declencherait un SON FANTOME. Voir fpgalink.cpp.          #
+-- #                  Emise ici, atomiquement, parce qu'il n'y a qu'UN fil vers #
+-- #                  l'ESP : cf. game_beacon.vhd (own_uart = false).           #
+-- #   0xF8 .. 0xF9   RADIO AUTORISEE  0xF8 | wifi_off        LEVEL             #
+-- #                    0xF8 = radio autorisee, 0xF9 = radio coupee par le DIP  #
+-- #                    d'option S1-6 (ferme = coupee). L'ESP eteint alors sa    #
+-- #                    radio : c'est le seul moyen, en clientele, de supprimer  #
+-- #                    le WiFi sans deposer la carte.                           #
+-- #   0xFB .. 0xFF   FREE (5 codes)                                             #
 -- #                                                                          #
 -- # Free space for new tokens: 0x32..0x3F (reserved to SOUND_WIRE) and        #
 -- # 0xF8..0xFF.  Do NOT reach into 0xE8..0xEF, which the disp_inject token    #
@@ -227,6 +242,9 @@ entity sound_link is
     snd_rel : in std_logic := '0';               -- with snd_stb: '1' = bus RELEASE (0x30)
     -- decoded machine family -> 0xF4 | fam (LEVEL).  00=80, 01=80A, 10=80B.
     fam   : in  std_logic_vector(1 downto 0) := "00";
+    -- DIP d'option S1-6 : '1' = radio coupee. Defaut '0' pour que toute
+    -- instanciation existante garde le comportement actuel (radio autorisee).
+    wifi_off : in std_logic := '0';
     game  : in  std_logic_vector(5 downto 0);    -- game_select
     game_running : in std_logic := '0';          -- '1' = a game is in play (tournament auto-timer)
     ball  : in  std_logic_vector(3 downto 0) := "0000";  -- ball-in-play ($0072) telemetry
@@ -239,6 +257,12 @@ entity sound_link is
     snap_data : in  std_logic_vector(7 downto 0) := (others => '0');
     snap_req  : in  std_logic := '0';          -- '1' = snap_data is valid, please send
     snap_ack  : out std_logic := '0';          -- pulsed one baud tick when accepted
+    -- Balise de jeu (game_beacon, own_uart = false) : 4 octets emis ATOMIQUEMENT,
+    -- octet 0 en poids faible. Defauts fournis : une instanciation qui ne s'en
+    -- sert pas elabore inchangee (SND_LINK_H du build hybride).
+    bcn_frame : in  std_logic_vector(31 downto 0) := (others => '0');
+    bcn_req   : in  std_logic := '0';          -- '1' = trame valide, a envoyer
+    bcn_ack   : out std_logic := '0';          -- pulse un tick baud a l'acceptation
     tx    : out std_logic                        -- UART TX to the ESP (idle high)
   );
 end sound_link;
@@ -260,6 +284,8 @@ architecture rtl of sound_link is
   signal rxc_r     : std_logic_vector(3 downto 0) := "0000";  -- deframed-byte count change detect
   signal game_pend : std_logic := '0';
   signal fam_pend  : std_logic := '1';           -- announce the family once at start
+  signal wof_r     : std_logic := '0';
+  signal wof_pend  : std_logic := '1';           -- annoncer l'etat de la radio une fois au demarrage
   signal gr_pend   : std_logic := '0';           -- game-state message pending (0xF2 over / 0xF3 run)
   signal ball_pend : std_logic := '0';           -- ball telemetry pending (0xA0 | ball)
   signal dinj_pend : std_logic := '1';           -- disp_inject state pending (0xE0 | dinj), announce once at start
@@ -291,6 +317,8 @@ architecture rtl of sound_link is
   signal st      : t_state := IDLE;
   signal shifter : std_logic_vector(7 downto 0) := (others => '0');
   signal bitn    : integer range 0 to 7 := 0;
+  signal bcn_sr  : std_logic_vector(31 downto 0) := (others => '0'); -- reste de la trame balise
+  signal bcn_n   : integer range 0 to 3 := 0;                        -- octets de balise restants
 begin
 
   -- baud-rate tick
@@ -331,12 +359,13 @@ begin
     if rising_edge(clk) then
       if rst = '1' then
         st <= IDLE; tx <= '1'; game_pend <= '0'; gr_pend <= '0'; mode_pend <= '1';
-        snap_ack <= '0';
+        snap_ack <= '0'; bcn_ack <= '0'; bcn_n <= 0;
         game_r <= game; diag_r <= diag; gr_r <= game_running; bitn <= 0; hb_cnt <= 0;
         ball_pend <= '0'; ball_r <= ball;
         dinj_pend <= '1'; dinj_r <= dinj;      -- announce the link state once out of reset
         rxc_pend  <= '0'; rxc_r  <= rxc;
         fam_pend  <= '1'; fam_r  <= fam;       -- announce the machine family once out of reset
+        wof_pend  <= '1'; wof_r  <= wifi_off;  -- ... et l'etat de la radio
         lvl_hold <= 0; starve <= 0;
         -- clear the sound FIFO; no phantom cue is emitted for the power-up bus
         -- state, because nothing is ever queued except on an snd_stb pulse.
@@ -357,6 +386,7 @@ begin
 
         -- latch changes promptly (every clk); keep the latest value
         if fam   /= fam_r   then fam_r   <= fam;   fam_pend  <= '1'; end if;
+        if wifi_off /= wof_r then wof_r <= wifi_off; wof_pend <= '1'; end if;
         if game  /= game_r  then game_r  <= game;  game_pend <= '1'; end if;
         if diag  /= diag_r  then diag_r  <= diag;  mode_pend <= '1'; end if;
         if game_running /= gr_r then gr_r <= game_running; gr_pend <= '1'; end if;
@@ -367,25 +397,63 @@ begin
         -- periodically (ESP re-syncs, and a STUCK disp_inject state is still
         -- reported instead of going silent and looking like "nothing to say").
         if hb_cnt = HB-1 then hb_cnt <= 0; mode_pend <= '1'; gr_pend <= '1'; dinj_pend <= '1';
+                                   wof_pend <= '1';   -- l'ESP peut avoir redemarre
         else hb_cnt <= hb_cnt + 1; end if;
 
         if baud_tick = '1' then
-          snap_ack <= '0';                                  -- default: ack is one baud tick wide
+          snap_ack <= '0'; bcn_ack <= '0';                  -- default: ack is one baud tick wide
           -- level-group guard decays on every byte slot, busy or idle
           if lvl_hold /= 0 then lvl_hold <= lvl_hold - 1; end if;
 
           case st is
             when IDLE =>
               tx <= '1';
-              -- (2) FAIRNESS OVERRIDE: after starve_max consecutive non-snapshot
-              -- bytes a waiting snapshot byte jumps the whole priority chain.
+              -- (0) BALISE DE JEU -- 4 OCTETS ATOMIQUES, priorite absolue.
+              -- Atomique par CONSTRUCTION : une fois `bcn_n` charge, cette branche
+              -- est prise a chaque creneau jusqu'a epuisement et la chaine de
+              -- priorite n'est pas reevaluee. C'est indispensable : les octets 1
+              -- a 3 sont des valeurs arbitraires, sans classe ; intercaler un
+              -- token les rendrait indistinguables cote ESP, et la somme de
+              -- controle (0x80..0x9F possible) passerait pour une commande son.
+              -- Cout : 4 creneaux, 2 fois par seconde = 348 us -- un son peut donc
+              -- etre retarde d'au plus 348 us, inaudible. `starve` n'est PAS
+              -- incremente ici, pour que la balise ne puisse pas affamer l'instantane.
+              if bcn_n /= 0 then
+                shifter <= bcn_sr(7 downto 0);
+                bcn_sr  <= x"00" & bcn_sr(31 downto 8);
+                bcn_n   <= bcn_n - 1;
+                st      <= START;
+              elsif bcn_req = '1' then
+                shifter <= bcn_frame(7 downto 0);      -- 0xFA part tout de suite
+                bcn_sr  <= x"00" & bcn_frame(31 downto 8);
+                bcn_n   <= 3;
+                bcn_ack <= '1';
+                st      <= START;
+              -- (1bis) SILENCE PENDANT UNE SESSION LISY.
+              -- Le fil vers l'ESP est aussi le canal ou LISY lit ses REPONSES. Tout
+              -- flux continu de notre part les noie : mesure du 2026-09-05 sur la
+              -- machine, « Control denied (Code 243) » ou 243 = 0xF3 est un de nos
+              -- jetons. Ralentir le battement de coeur n'avait pas suffi -- le
+              -- probleme n'est pas le debit, c'est le partage.
+              -- En diagnostic le 6502 est TENU : il n'y a aucun son a annoncer, donc
+              -- se taire ne coute rien. Seule la balise continue (branches ci-dessus),
+              -- pour que l'ESP voie toujours le FPGA.
+              -- (0bis) JETON DE MODE -- HORS DE LA PORTE, comme la balise.
+              -- Il etait a l'interieur : en diagnostic la porte se ferme, donc le seul
+              -- octet qui dit « je suis en diagnostic » ne pouvait JAMAIS sortir et
+              -- l'ESP lisait 0xF0 a vie. L'instrument etait aveugle a l'etat qu'il
+              -- devait detecter (paye le 2026-09-07). Cout de le laisser passer :
+              -- 1 octet par changement + 1 par battement (hb_ms = 1 s), soit 23 us de
+              -- fil par seconde -- sans commune mesure avec le flux continu qui noyait
+              -- les reponses LISY, qui lui reste bien derriere la porte.
+              elsif lvl_ok = '1' and mode_pend = '1' then
+                nb := "1111000" & diag_r;  shifter <= nb; mode_pend <= '0'; st <= START;
+                lvl_hold <= lvl_gap; if starve /= starve_max then starve <= starve + 1; end if;
+              elsif diag = '0' then
               if starve = starve_max and snap_req = '1' then
                 shifter <= snap_data;      snap_ack <= '1'; st <= START;
                 starve  <= 0;
               -- (1) LEVEL tokens, rate-limited as a group by lvl_hold
-              elsif lvl_ok = '1' and mode_pend = '1' then      -- mode token = highest priority
-                nb := "1111000" & diag_r;  shifter <= nb; mode_pend <= '0'; st <= START;
-                lvl_hold <= lvl_gap; if starve /= starve_max then starve <= starve + 1; end if;
               elsif lvl_ok = '1' and gr_pend = '1' then        -- game-state: 0xF2 over / 0xF3 running
                 nb := "1111001" & gr_r;    shifter <= nb; gr_pend  <= '0'; st <= START;
                 lvl_hold <= lvl_gap; if starve /= starve_max then starve <= starve + 1; end if;
@@ -404,6 +472,9 @@ begin
               elsif lvl_ok = '1' and fam_pend = '1' then      -- machine family: 0xF4 | fam
                 nb := "111101" & fam_r;    shifter <= nb; fam_pend  <= '0'; st <= START;
                 lvl_hold <= lvl_gap; if starve /= starve_max then starve <= starve + 1; end if;
+              elsif lvl_ok = '1' and wof_pend = '1' then      -- radio : 0xF8 | wifi_off
+                nb := "1111100" & wof_r;   shifter <= nb; wof_pend  <= '0'; st <= START;
+                lvl_hold <= lvl_gap; if starve /= starve_max then starve <= starve + 1; end if;
               -- EVENT class: sound is never coalesced and never rate-limited.
               -- 0x31 (a cue was lost) goes FIRST so it always precedes the cue
               -- that follows the gap it reports.
@@ -419,6 +490,7 @@ begin
               elsif snap_req = '1' then                      -- RAM snapshot = lowest priority
                 shifter <= snap_data;      snap_ack <= '1'; st <= START;
                 starve  <= 0;
+              end if;
               end if;
             when START =>
               tx <= '0'; bitn <= 0; st <= DATA;              -- start bit

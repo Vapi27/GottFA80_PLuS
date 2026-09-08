@@ -25,7 +25,8 @@
 --    compteur de tick. C'est ce qui rend le module assez petit pour les ~145 LUT
 --    qui restent sur le XC6SLX9 (mesure : le build actuel occupe 97 % des LUT et
 --    99 % des slices).
---    A 8N1, debit d'echantillons = BAUD / 10. Pour 22 050 Hz : 220 500 bauds.
+--    A 8N1 un octet coute 10 bits, et un echantillon fait DEUX octets (14 bits) :
+--    debit d'echantillons = BAUD / 20. Pour 22 050 Hz : 441 000 bauds.
 --
 -- ⚠️ LE RETOUR AU REPOS N'EST PAS UN CONFORT. Tenir le dernier echantillon apres
 --    la fin d'une phrase, c'est envoyer une tension CONTINUE dans un ampli de
@@ -40,7 +41,7 @@ use ieee.numeric_std.all;
 entity audio_uart is
   generic (
     CLK_HZ     : integer := 50000000;
-    BAUD       : integer := 220500;   -- 22 050 echantillons/s en 8N1
+    BAUD       : integer := 441000;   -- 22 050 ech/s x 2 octets, en 8N1
     SILENCE_MS : integer := 50        -- sans octet au-dela : retour a mi-echelle
   );
   port (
@@ -48,6 +49,10 @@ entity audio_uart is
     reset_n : in  std_logic;
     rx      : in  std_logic;          -- ESP GPIO17 -> P143
     audio_o : out std_logic;          -- vers la broche Sound (P44) -> RC -> TDA7267
+    -- Le MEME echantillon, AVANT le modulateur. En mode hybride il faut le SOMMER
+    -- avec celui de GOSOF80 avant un unique modulateur : la carte n'a qu'un seul
+    -- etage audio, donc deux modulateurs ne peuvent pas partager la broche.
+    pcm_o   : out std_logic_vector(13 downto 0);
     active  : out std_logic           -- '1' tant que des octets arrivent (diagnostic)
   );
 end audio_uart;
@@ -62,7 +67,20 @@ architecture rtl of audio_uart is
   signal cpt    : integer range 0 to DIV := 0;
   signal nbit   : integer range 0 to 7 := 0;
   signal sr     : std_logic_vector(7 downto 0) := (others => '0');
-  signal ech    : std_logic_vector(7 downto 0) := x"80";     -- mi-echelle = silence
+  -- ECHANTILLON 14 BITS, transmis en DEUX octets auto-cadres :
+  --     octet A : 0 & ech(13 downto 7)      (bit de poids fort = marqueur)
+  --     octet B : 1 & ech(6 downto 0)
+  -- Le marqueur suffit a savoir qui est qui, meme apres un octet perdu : aucun
+  -- protocole de trame, aucune resynchronisation a prevoir.
+  -- POURQUOI 14 BITS. En 8 bits le plancher de bruit est a ~50 dB, et le dither
+  -- necessaire pour eviter la distorsion s'entend alors comme un SOUFFLE CONSTANT
+  -- (rapporte a l'ecoute le 2026-09-05). A 14 bits il tombe vers 86 dB, sous le
+  -- seuil d'audibilite de cette chaine. Le modulateur, lui, n'a jamais ete le
+  -- facteur limitant : a 50 MHz pour 22 050 Hz il suroechantillonne 2268 fois.
+  constant MI_ECHELLE : std_logic_vector(13 downto 0) := "10" & x"000";  -- 0x2000
+  signal ech    : std_logic_vector(13 downto 0) := MI_ECHELLE;
+  signal haut   : std_logic_vector(6 downto 0) := (others => '0');
+  signal a_haut : std_logic := '0';           -- l'octet de poids fort est en attente
   signal muet   : integer range 0 to REPOS_N := REPOS_N;
   -- Deux bascules avant tout usage : `rx` vient d'une autre carte, sur un fil qui
   -- n'est pas synchrone de notre horloge. Sans ca, un front qui arrive juste au
@@ -71,8 +89,10 @@ architecture rtl of audio_uart is
   signal rx_s   : std_logic_vector(2 downto 0) := (others => '1');
 begin
 
+  pcm_o <= ech;
+
   audio_o_dac : entity work.dac
-    generic map (msbi_g => 7)
+    generic map (msbi_g => 13)
     port map (clk_i => clk, res_n_i => reset_n, dac_i => ech, dac_o => audio_o);
 
   active <= '0' when muet = REPOS_N else '1';
@@ -82,13 +102,13 @@ begin
     if rising_edge(clk) then
       if reset_n = '0' then
         etat <= ATTENTE; cpt <= 0; nbit <= 0;
-        ech <= x"80"; muet <= REPOS_N; rx_s <= (others => '1');
+        ech <= MI_ECHELLE; muet <= REPOS_N; rx_s <= (others => '1'); a_haut <= '0';
       else
         rx_s <= rx_s(1 downto 0) & rx;
 
         -- Retour au silence : un ampli ne doit pas rester sur une tension continue.
         if muet < REPOS_N then muet <= muet + 1; end if;
-        if muet = REPOS_N - 1 then ech <= x"80"; end if;
+        if muet = REPOS_N - 1 then ech <= MI_ECHELLE; a_haut <= '0'; end if;
 
         case etat is
           when ATTENTE =>
@@ -124,8 +144,16 @@ begin
               -- cadrage perdu produirait sinon des echantillons au hasard, c'est-
               -- a-dire du bruit blanc pleine echelle dans le haut-parleur.
               if rx_s(1) = '1' then
-                ech  <= sr;
                 muet <= 0;
+                if sr(7) = '0' then
+                  haut   <= sr(6 downto 0);      -- octet de poids fort, on attend l'autre
+                  a_haut <= '1';
+                elsif a_haut = '1' then
+                  ech    <= haut & sr(6 downto 0);
+                  a_haut <= '0';
+                end if;
+                -- Un octet de poids faible sans son poids fort est IGNORE : c'est
+                -- ainsi que le cadrage se rattrape tout seul apres une perte.
               end if;
             else
               cpt <= cpt + 1;
