@@ -51,7 +51,27 @@ entity gosof80 is
 		soundrom1_addr : out std_logic_vector(10 downto 0);
 		soundrom2_addr : out std_logic_vector(10 downto 0);
 		soundrom1_dout : in std_logic_vector(7 downto 0);
-		soundrom2_dout : in std_logic_vector(7 downto 0)
+		soundrom2_dout : in std_logic_vector(7 downto 0);
+
+		-- ATTRACT INTERNE DE LA CARTE SON -> evenement vers l'ESP.
+		-- La ROM MA-216 se declenche des sons TOUTE SEULE : boucle de comptage en
+		-- $F06B, intervalle choisi par ses DIP 3 et 4 (10 s / 2 min / 4 min), puis
+		-- tirage d'un son parmi six -- ses numeros 27 a 32, les six dernieres
+		-- entrees de sa table de pointeurs, qui se termine juste avant la table
+		-- d'intervalles en $F68B. Quatre de ces six (27, 29, 31, 32) passent par le
+		-- sequenceur de phonemes en $F251.
+		-- Or le modele SC-01 de ce depot n'a AUCUNE sortie audio : il ne fait que
+		-- rendre A/R au bon moment pour tromper le programme (« This is only a
+		-- simulation of signaling to fool the program that SC01 is there », en-tete
+		-- de Votrax-SC01.vhd). Ces quatre sons sont donc silencieux, pendant
+		-- exactement la bonne duree. En jeu la parole s'entend parce que ce sont des
+		-- echantillons joues par l'ESP, choisis d'apres la commande du CPU
+		-- principal ; l'attract, lui, ne passe jamais par cette route.
+		-- On sort donc ici le numero que la carte son se donne a elle-meme en $00 de
+		-- sa page zero : c'est la valeur que lit sa routine de lecture en $F0CF,
+		-- quelle que soit la source. SYS80 en fait un evenement son ordinaire.
+		snd_int_val : out std_logic_vector(7 downto 0);
+		snd_int_stb : out std_logic
 		
 		);
 end gosof80;
@@ -79,6 +99,11 @@ architecture rtl of gosof80 is
 	signal n_cpu_nmi	: 	std_logic;
 	signal n_cpu_irq	:  std_logic;
 	signal cpu_wr_n	:  std_logic;
+	-- espion du numero de son interne (cf. snd_int_val dans l'entite)
+	signal sb_ram_wr	:  std_logic;
+	signal sb_ram_wr_d	:  std_logic := '0';
+	signal sb_pend_val	:  std_logic_vector(7 downto 0) := (others => '0');
+	signal sb_pend_cnt	:  integer range 0 to 511 := 0;
 	
 	signal riot_dout	:  std_logic_vector(7 downto 0);
 	signal riot_pa_i	:  std_logic_vector(7 downto 0);
@@ -357,6 +382,63 @@ port map(
 	wren 		=> ram_cs and not cpu_wr_n,
 	q			=> ram_dout
 );
+
+-- ESPION DU NUMERO DE SON D'ATTRACT (voir l'en-tete de l'entite).
+--
+-- ON DETECTE UNE PAIRE, PAS UNE ECRITURE SEULE. La routine d'attract depose son
+-- numero de son dans DEUX cases de suite, avec la MEME valeur :
+--     F0A6  STA $00      ; le numero de son
+--     F0A8  STA $6B      ; ... et le drapeau « je viens de faire un attract »
+-- Les trois dispatches du CPU principal ($F0C9, $F543, $F61A) ecrivent $00 mais
+-- JAMAIS $6B ; les ecritures de $6B du gestionnaire d'IRQ ($F592, $F59E, $F5AC)
+-- ne sont jamais collees a une ecriture de $00.
+--
+-- POURQUOI PAS L'ECRITURE DE $00 SEULE, avec une simple fenetre de garde apres
+-- le dernier evenement de bus : la routine de parole BLOQUE jusqu'a la fin de la
+-- phrase (boucle $F293, attente de A/R a chaque phoneme). Une commande arrivee
+-- pendant qu'une phrase joue est rangee en $17 par l'IRQ et n'atteint $00 que des
+-- SECONDES plus tard. snd_bus l'a deja rapportee a l'instant de la commande :
+-- l'ESP rejouerait l'echantillon une seconde fois. Un ECHO, en pleine partie.
+--
+-- Front MONTANT de l'ecriture : `wren` est un niveau tenu toute la phase phi2, il
+-- produirait des dizaines d'impulsions a 50 MHz pour une seule instruction.
+-- Zero n'est pas un son ($F02C efface la page zero, $F0B2 remet $00 a zero en
+-- tete de la boucle d'attente) : on le filtre ici.
+sb_ram_wr <= ram_cs and not cpu_wr_n;
+
+P_SND_INT : process(clk_50)
+begin
+	if rising_edge(clk_50) then
+		snd_int_stb <= '0';
+		if reset_l = '0' then
+			sb_ram_wr_d <= '0';
+			sb_pend_val <= (others => '0');
+			sb_pend_cnt <= 0;
+			snd_int_val <= (others => '0');
+		else
+			sb_ram_wr_d <= sb_ram_wr;
+			if sb_pend_cnt /= 0 then
+				sb_pend_cnt <= sb_pend_cnt - 1;
+			end if;
+			if sb_ram_wr = '1' and sb_ram_wr_d = '0' and cpu_dout /= x"00" then
+				if cpu_addr(6 downto 0) = "0000000" then       -- $00 : on arme
+					sb_pend_val <= cpu_dout;
+					-- 511 cycles a 50 MHz = 10 us, soit ~9 cycles du 6502 a 895 kHz.
+					-- STA $00 puis STA $6B sont adjacentes : 3 cycles les separent.
+					-- Assez large pour la paire, trop etroit pour quoi que ce soit
+					-- d'autre.
+					sb_pend_cnt <= 511;
+				elsif cpu_addr(6 downto 0) = "1101011"          -- $6B : on confirme
+				      and sb_pend_cnt /= 0
+				      and cpu_dout = sb_pend_val then
+					snd_int_val <= cpu_dout;
+					snd_int_stb <= '1';
+					sb_pend_cnt <= 0;
+				end if;
+			end if;
+		end if;
+	end if;
+end process;
 
 
 -- 6502 CPU

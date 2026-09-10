@@ -420,6 +420,15 @@ signal 	u6_pa_wr			: std_logic;   -- U6 RIOT: the CPU has just written ORA (port
 signal 	snd_sel			: std_logic;   -- '1' = a sound code is selected on the bus
 signal 	snd_stb			: std_logic;   -- one clk_50 pulse per sound-bus event
 signal 	snd_rel			: std_logic;   -- with snd_stb: '1' = the bus was RELEASED
+-- ATTRACT DE LA CARTE SON (voir le bloc P_SB_GUARD plus bas). Valeurs initiales
+-- fournies : hors du build hybride, GEN_FPGA_SND n'existe pas et ces signaux
+-- n'ont alors AUCUN pilote -- ils doivent rester inertes, pas indefinis.
+signal 	sb_snd_val		: std_logic_vector(7 downto 0) := (others => '0');
+signal 	sb_snd_stb		: std_logic := '0';
+signal 	sb_snd_ok		: std_logic;   -- valeur emettable
+signal 	snd_stb_mux		: std_logic;
+signal 	snd_rel_mux		: std_logic;
+signal 	snd_code_mux	: std_logic_vector(4 downto 0);
 signal 	fam_code			: std_logic_vector(1 downto 0);  -- 00=80 01=80A 10=80B -> 0xF4|fam
 
 -- address decoding helper
@@ -445,7 +454,15 @@ signal ctrl_req_s  : std_logic_vector(2 downto 0) := (others => '1');
 -- voit comme un jeu qui delire. On exige donc d'avoir vu la ligne AU REPOS (haut)
 -- au moins une fois avant d'accepter la moindre demande, et qu'elle soit ensuite
 -- basse de facon STABLE (1 ms) pour qu'un parasite ne suffise pas.
-constant ctrl_low_max : integer := 50000;                    -- 1 ms a 50 MHz
+constant ctrl_ms_tick : integer := 50000;                    -- 1 ms a 50 MHz (prescaler)
+-- Duree MINIMALE d'un creux sur P141 pour valoir demande de controle. 1 ms etait a
+-- portee d'un accident : le redemarrage de l'ESP fige la machine (prouve au banc le
+-- 2026-09-10 -- lisy_active tient cpu_res_n a 0 et rend les lampes a lisyctrl, muet ;
+-- ouvrir le port serie suffit a declencher le creux). Un usage legitime tient la ligne
+-- 150 ms (CTRL_SETTLE_MS de fa_connect) a plusieurs secondes (ecriture NOR) : 100 ms
+-- separe les deux sans ambiguite. Le prescaler DOIT rester une constante distincte,
+-- sinon ctrl_arm_ms = 2000 passerait de 2 s a 200 s.
+constant ctrl_low_max : integer := 5000000;                  -- 100 ms a 50 MHz
 -- 🔴 DELAI D'ARMEMENT APRES LA SORTIE DE RESET. Mesure du 2026-09-07 : la ligne
 -- P141 DESCEND pendant le demarrage (bit collant `ctrl_low_seen` a 1 alors que le
 -- niveau courant est au repos). L'ESP met ~1 s a piloter sa broche ; d'ici la, le
@@ -459,7 +476,7 @@ constant ctrl_low_max : integer := 50000;                    -- 1 ms a 50 MHz
 -- Le bon critere n'est pas « la ligne est-elle credible » mais « le jeu a-t-il eu
 -- le temps de demarrer ». 2 s couvrent largement le demarrage de l'ESP.
 constant ctrl_arm_ms  : integer := 2000;
-signal ctrl_pre : integer range 0 to ctrl_low_max-1 := 0;
+signal ctrl_pre : integer range 0 to ctrl_ms_tick-1 := 0;
 signal ctrl_ms  : integer range 0 to ctrl_arm_ms := 0;
 -- Entree effective : la broche, ou un repos permanent quand le chemin est coupe.
 -- Coupe, la chaine entiere (synchroniseur, compteur, branche) se replie sur des
@@ -490,9 +507,14 @@ signal lamp_snoop_d : std_logic_vector(7 downto 0) := (others => '0');
 signal lamp_data_s  : std_logic_vector(7 downto 0) := (others => '0');
 signal lamp_req_s   : std_logic := '0';
 signal lamp_ack_s   : std_logic := '0';
-signal lamp_ph      : integer range 0 to 2 := 0;   -- 0 repos, 1 quartet haut envoye ?, 2 bas
-signal lamp_gap     : integer range 0 to 1000000 := 0;   -- limiteur de cadence
+signal lamp_ph      : integer range 0 to 2 := 0;   -- 0 repos, 1 marqueur, 2 quartets
 signal lamp_ack_d   : std_logic := '0';                 -- pour detecter le FRONT d'acquittement
+-- IMAGE DES SEIZE COLONNES (v3, 2026-09-08). Voir le commentaire de P_LAMP_SNOOP.
+type lamp_sh_t is array (0 to 15) of std_logic_vector(3 downto 0);
+signal lamp_shadow  : lamp_sh_t := (others => "0000");
+signal lamp_prev    : std_logic_vector(7 downto 0) := (others => '0');
+signal lamp_tick    : integer range 0 to 50000000 := 0;  -- cadence d'emission, 1 s
+signal lamp_idx     : integer range 0 to 15 := 0;
 signal snap_mux_data : std_logic_vector(7 downto 0);
 signal snap_mux_req  : std_logic;
 signal ctrl_armed  : std_logic := '0';
@@ -1180,37 +1202,61 @@ P_VIE : process begin
 	if vie_pb_d /= u6pb_src then pb_age <= 0; elsif pb_age /= 5000000 then pb_age <= pb_age + 1; end if;
 end process;
 cpu_alive_s <= '1' when irq_age /= 5000000 else '0';
+-- ESPION DE LAMPES v3 : UNE IMAGE, PLUS UN ECHANTILLONNAGE.
+--
+-- LES DEUX VERSIONS PRECEDENTES ONT ECHOUE POUR DES RAISONS OPPOSEES, et c'est
+-- la lecon a retenir. La v1 emettait sur tout changement du port : 5 000 octets/s,
+-- le lien noye, ni son ni balise lisibles -- un espion qui sature la voie qu'il
+-- observe ne mesure plus rien. La v2 a ajoute une garde de 20 ms pour respirer,
+-- et a herite du defaut inverse : le multiplexage des lampes a une periode du
+-- MEME ordre, les deux battent l'un contre l'autre et l'echantillonnage se
+-- verrouille sur une seule phase. Mesure du 2026-09-08 : PENDANT UNE PARTIE, ou
+-- les lampes sont visiblement allumees, la v2 ne rapportait QUE la colonne 0 avec
+-- la donnee a zero. Un resultat impossible, donc un instrument faux -- et il
+-- avait deja produit une conclusion credible sur l'attract, qu'il a fallu retirer.
+--
+-- v3 : on ne prend plus d'echantillons du tout. Le FPGA tient une IMAGE des seize
+-- colonnes, mise a jour a CHAQUE ecriture du port, sans filtrage ni garde ; et il
+-- emet la trame COMPLETE une fois par seconde. Dix-sept octets/s : aucune
+-- saturation possible, et comme rien n'est echantillonne, aucun aliasing possible.
+-- Trame : 0xBF (marqueur) puis SEIZE octets 0xD0|donnee, colonnes 0 a 15 dans
+-- l'ordre -- la position apres le marqueur donne la colonne.
 P_LAMP_SNOOP : process begin
 	wait until rising_edge(clk_50);
-	lamp_snoop_d <= u6pb_src;
-	lamp_ack_d   <= lamp_ack_s;
-	if lamp_gap /= 0 then lamp_gap <= lamp_gap - 1; end if;
+	lamp_ack_d <= lamp_ack_s;
+	lamp_prev  <= u6pb_src;
+	-- L'IMAGE : toute ecriture du port est enregistree, sans exception.
+	if u6pb_src /= lamp_prev then
+		lamp_shadow(to_integer(unsigned(u6pb_src(7 downto 4)))) <= u6pb_src(3 downto 0);
+	end if;
+	if lamp_tick /= 0 then lamp_tick <= lamp_tick - 1; end if;
 	case lamp_ph is
 		when 0 =>
-			-- 🔴 N'EMETTRE QUE SUR CHANGEMENT DE COLONNE, ET AU PLUS ~50 FOIS/s.
-			-- La premiere version declenchait sur tout changement du port : la
-			-- donnee bouge en continu, ce qui a NOYE le lien (5 000 octets/s de
-			-- 0xC0, plus de son ni de balise lisibles -- mesure du 2026-09-08).
-			-- Un espion qui sature la voie qu'il observe ne mesure plus rien.
-			if lamp_snoop_d(7 downto 4) /= u6pb_src(7 downto 4)
-			   and lamp_gap = 0 and lisy_active = '0' then
-				lamp_snoop_v <= u6pb_src;
-				lamp_data_s  <= "1100" & u6pb_src(7 downto 4);   -- 0xC0 | colonne
-				lamp_req_s   <= '1'; lamp_ph <= 1; lamp_gap <= 1000000;   -- 20 ms a 50 MHz
+			if lamp_tick = 0 and lisy_active = '0' then
+				lamp_data_s <= x"BF";              -- marqueur de trame
+				lamp_req_s  <= '1';
+				lamp_idx    <= 0;
+				lamp_ph     <= 1;
 			end if;
 		-- 🔴 AVANCER SUR LE FRONT DE L'ACQUITTEMENT, PAS SUR SON NIVEAU.
-		-- `snap_ack` dure un temps-bit entier ; a 50 MHz les deux etats le
-		-- voyaient dans la MEME impulsion et on relachait avant que le second
-		-- quartet parte : on ne voyait que des 0xC0, jamais de 0xD0
-		-- (mesure du 2026-09-08).
+		-- `snap_ack` dure un temps-bit entier ; a 50 MHz deux etats successifs le
+		-- verraient dans la MEME impulsion et on avancerait de deux crans d'un coup
+		-- (defaut paye sur la v2, mesure du 2026-09-08).
 		when 1 =>
 			if lamp_ack_s = '1' and lamp_ack_d = '0' then
-				lamp_data_s <= "1101" & lamp_snoop_v(3 downto 0);  -- 0xD0 | donnee
+				lamp_data_s <= "1101" & lamp_shadow(0);
 				lamp_ph <= 2;
 			end if;
 		when 2 =>
 			if lamp_ack_s = '1' and lamp_ack_d = '0' then
-				lamp_req_s <= '0'; lamp_ph <= 0;
+				if lamp_idx = 15 then
+					lamp_req_s <= '0';
+					lamp_tick  <= 50000000;        -- 1 s a 50 MHz
+					lamp_ph    <= 0;
+				else
+					lamp_idx    <= lamp_idx + 1;
+					lamp_data_s <= "1101" & lamp_shadow(lamp_idx + 1);
+				end if;
 			end if;
 	end case;
 end process;
@@ -1228,7 +1274,7 @@ LISY_MODE: process begin
 	wait until rising_edge(clk_50);
 	ctrl_req_s <= ctrl_req_s(1 downto 0) & ctrl_req_in;
 	-- Compteur de millisecondes depuis la sortie de reset (voir ctrl_arm_ms).
-	if ctrl_pre = ctrl_low_max-1 then
+	if ctrl_pre = ctrl_ms_tick-1 then
 		ctrl_pre <= 0;
 		if ctrl_ms /= ctrl_arm_ms then ctrl_ms <= ctrl_ms + 1; end if;
 	else
@@ -2303,6 +2349,37 @@ port map(
 	rel   => snd_rel
 );
 
+----------------------
+-- ATTRACT DE LA CARTE SON -> EVENEMENT SON VERS L'ESP
+----------------------
+-- GOSOF80 ne signale QUE l'attract de sa ROM : il exige la paire d'ecritures
+-- $00 puis $6B avec la meme valeur, signature des instructions $F0A6/$F0A8 que
+-- les dispatches du CPU principal ne produisent jamais. Voir P_SND_INT dans
+-- lib_common/GOSOF80.vhd, y compris pourquoi une simple fenetre de garde ne
+-- suffisait PAS (la routine de parole bloque, une commande peut n'arriver en $00
+-- que des secondes plus tard -- et l'ESP la rejouerait en echo).
+--
+-- 0x80|n n'a que CINQ bits utiles : 32 deborderait sur 0xA0, qui est le jeton
+-- « bille en jeu » (carte des octets en tete de sound_link.vhd). Le son 32 du
+-- Volcano n'a de toute facon pas d'echantillon -- 0032 est absent de vlcno_ax --
+-- il est donc simplement perdu, et jamais mal interprete.
+-- `snd_stb = '0'` exclut le cycle ou les deux evenements coincideraient : la
+-- garde ne monte qu'au front suivant, les deux se fondraient en un seul.
+sb_snd_ok <= '1' when sb_snd_stb = '1' and snd_stb = '0'
+                  and unsigned(sb_snd_val) > 0 and unsigned(sb_snd_val) < 32
+             else '0';
+
+snd_stb_mux  <= snd_stb or sb_snd_ok;
+snd_code_mux <= (Sound_S16 & Sound_S8 & Sound_S4 & Sound_S2 & Sound_S1)
+                when snd_stb = '1' else sb_snd_val(4 downto 0);
+-- 🔴 snd_rel EST MEMORISE, PAS IMPULSIONNEL. snd_bus le met a '1' sur la relache
+-- du bus et l'y LAISSE jusqu'a la commande suivante (lib_common/snd_bus.vhd).
+-- Or sound_link empile `snd_rel & sound` a chaque snd_stb et emet 0x30 -- « bus
+-- relache » -- des que ce bit vaut '1' (snd_q(5), ligne 485). Pendant l'attract le
+-- bus est justement relache : sans ce multiplexage l'evenement injecte partirait
+-- en 0x30 et l'ESP ne jouerait RIEN. Un son injecte n'est jamais une relache.
+snd_rel_mux  <= snd_rel when snd_stb = '1' else '0';
+
 -- Machine family for the 0xF4|fam link token.  is_80B already carries the DIP
 -- S1-6 manual override, so it is tested first; the three flags are otherwise
 -- mutually exclusive by construction (gts_family.vhd).
@@ -2348,7 +2425,11 @@ generic map( attract_snd_off => attract_snd_off )
 		soundrom1_addr => soundrom1_addr,
 		soundrom2_addr => soundrom2_addr,
 		soundrom1_dout => soundrom1_dout,
-		soundrom2_dout => soundrom2_dout
+		soundrom2_dout => soundrom2_dout,
+
+		-- numero de son que la carte son se donne a elle-meme (attract de sa ROM)
+		snd_int_val => sb_snd_val,
+		snd_int_stb => sb_snd_stb
 		
 	);
 end generate GEN_FPGA_SND;
@@ -2479,9 +2560,11 @@ generic map( hb_ms => 1000 )
 port map(
 	clk => clk_50, rst => not reset_l,
 	diag => lisy_active,
-	sound => Sound_S16 & Sound_S8 & Sound_S4 & Sound_S2 & Sound_S1,
-	snd_stb => snd_stb,                               -- EVENT stream, see SND_LINK above
-	snd_rel => snd_rel,
+	-- Flux MULTIPLEXE : les commandes du CPU principal (snd_bus) PLUS les sons que
+	-- la carte son se declenche toute seule en attract. Cf. P_SB_GUARD.
+	sound => snd_code_mux,
+	snd_stb => snd_stb_mux,                           -- EVENT stream, see SND_LINK above
+	snd_rel => snd_rel_mux,                           -- cf. le commentaire de snd_rel_mux
 	fam  => fam_code,
 	game => gnum,                                     -- true game number, see SND_LINK above
 	game_running => game_running,                     -- tournament auto-timer (0xF2/0xF3 to ESP)
