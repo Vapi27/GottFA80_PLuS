@@ -39,12 +39,6 @@ entity SYS80 is
 		-- (`lisy_active`). Le mettre a false rend le design identique a celui du
 		-- 5 septembre de ce cote, sans toucher au reste, pour bissecter en un build.
 		ctrl_line_en : boolean := true;
-		-- OBSERVER SANS BRANCHER. Avec ctrl_line_en=false et ctrl_line_obs=true, le
-		-- tampon d'entree de P141 existe et n'alimente QUE la balise : `lisy_active`
-		-- ne le voit jamais. Si la machine deraille quand meme, la faute vient de la
-		-- presence du tampon (physique) ; si elle est saine, elle vient du chemin
-		-- logique. Un seul build separe les deux.
-		ctrl_line_obs : boolean := false;
 		-- Poids de GOSOF80 dans le melangeur hybride. 64 = plein niveau (GOSOF80 sort
 		-- du 8 bits, l'ESP du 14 : le facteur 64 remet les deux a la meme echelle),
 		-- 32 = -6 dB, 16 = -12 dB. C'est le SEUL chiffre qui regle l'equilibre voix /
@@ -464,7 +458,7 @@ constant ctrl_ms_tick : integer := 50000;                    -- 1 ms a 50 MHz (p
 -- sinon ctrl_arm_ms = 2000 passerait de 2 s a 200 s.
 constant ctrl_low_max : integer := 5000000;                  -- 100 ms a 50 MHz
 -- 🔴 DELAI D'ARMEMENT APRES LA SORTIE DE RESET. Mesure du 2026-09-07 : la ligne
--- P141 DESCEND pendant le demarrage (bit collant `ctrl_low_seen` a 1 alors que le
+-- P141 DESCEND pendant le demarrage (temoin collant d'alors : la ligne vue basse
 -- niveau courant est au repos). L'ESP met ~1 s a piloter sa broche ; d'ici la, le
 -- FPGA tenait le 6502 EN PLEINE INITIALISATION. Le diagnostic se refermait ensuite
 -- tout seul -- donc on lisait `diag=0` -- mais le jeu repartait avec une RAM
@@ -482,9 +476,6 @@ signal ctrl_ms  : integer range 0 to ctrl_arm_ms := 0;
 -- Coupe, la chaine entiere (synchroniseur, compteur, branche) se replie sur des
 -- constantes et disparait a la synthese.
 signal ctrl_req_in : std_logic;
-signal ctrl_obs    : std_logic;                       -- vers la balise uniquement
-signal ctrl_obs_s  : std_logic_vector(2 downto 0) := (others => '1');
-signal ctrl_low_seen : std_logic := '0';              -- collant
 signal build_tag_s : std_logic;                       -- etiquette de build (generic)
 -- TEMOINS DE VIE DU 6502 (2026-09-08). `game_running` est un verrou a sens unique
 -- (255 IRQ puis plus jamais) : il ne distingue pas un CPU qui tourne d'un CPU fige.
@@ -1055,8 +1046,8 @@ port map(
 	is_80A       => is_80A,
 	reset_l      => reset_l,
 	diag_esp     => lisy_by_esp,
-	ctrl_lvl     => cpu_alive_s,      -- b5 : IRQ vivante (100 ms)   [remplace le niveau P141]
-	ctrl_low_seen=> io_alive_s,       -- b6 : lampes ecrites (100 ms) [remplace le collant P141]
+	cpu_alive    => cpu_alive_s,      -- b5 : IRQ vivante (100 ms)
+	io_alive     => io_alive_s,       -- b6 : port des lampes ecrit (100 ms)
 	build_tag    => build_tag_s,
 	tx           => beacon_tx_s,
 	frame        => bcn_frame_s,
@@ -1190,7 +1181,6 @@ U4_PB     <= lisy_u4pb when lisy_active = '1' else u4_pb_cpu;
 -- lisy_by_esp remembers which door was used, so an ESP that goes quiet cannot
 -- cancel a diag session the operator started at the door switch.
 ctrl_req_in <= esp_ctrl_req_n when ctrl_line_en else '1';
-ctrl_obs    <= esp_ctrl_req_n when (ctrl_line_en or ctrl_line_obs) else '1';
 build_tag_s <= '1' when build_tag /= 0 else '0';
 snap_mux_data <= lamp_data_s when lamp_snoop_en else snap_data_s;
 snap_mux_req  <= lamp_req_s  when lamp_snoop_en else snap_req_s;
@@ -1221,6 +1211,15 @@ cpu_alive_s <= '1' when irq_age /= 5000000 else '0';
 -- saturation possible, et comme rien n'est echantillonne, aucun aliasing possible.
 -- Trame : 0xBF (marqueur) puis SEIZE octets 0xD0|donnee, colonnes 0 a 15 dans
 -- l'ordre -- la position apres le marqueur donne la colonne.
+-- ⚠️ SOUS GENERATE DEPUIS LE 2026-09-10. Le process etait inconditionnel ; seules ses
+-- sorties etaient multiplexees par lamp_snoop_en. MESURE, et contre mon attente : ca
+-- ne coutait RIEN en ressources -- XST l'elaguait deja (0 occurrence de lamp_shadow
+-- dans le rapport de synthese, avant comme apres ; registres identiques, +4 LUT). Le
+-- generate ne fait donc pas gagner de logique : il rend l'intention explicite et
+-- empeche qu'une future lecture d'un de ses signaux le ressuscite en silence. Car cet
+-- espion-la a masque un correctif valable pendant cinq gravures (2026-09-08) : le jour
+-- ou il revient, ce doit etre parce que quelqu'un l'a demande.
+GEN_LAMP_SNOOP: if lamp_snoop_en generate
 P_LAMP_SNOOP : process begin
 	wait until rising_edge(clk_50);
 	lamp_ack_d <= lamp_ack_s;
@@ -1260,14 +1259,8 @@ P_LAMP_SNOOP : process begin
 			end if;
 	end case;
 end process;
+end generate;
 io_alive_s  <= '1' when pb_age  /= 5000000 else '0';
-
--- Observation pure : synchronisation + memoire collante du moindre passage bas.
-P_CTRL_OBS : process begin
-	wait until rising_edge(clk_50);
-	ctrl_obs_s <= ctrl_obs_s(1 downto 0) & ctrl_obs;
-	if ctrl_obs_s(2) = '0' then ctrl_low_seen <= '1'; end if;
-end process;
 
 GEN_LISY: if lisy_enable generate
 LISY_MODE: process begin

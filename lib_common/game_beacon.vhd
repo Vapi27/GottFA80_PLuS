@@ -44,8 +44,12 @@ port(
     is_80A       : in  std_logic;
     reset_l      : in  std_logic;
     diag_esp     : in  std_logic := '0';   -- diagnostic ouvert par l'ESP (et non par Test)
-    ctrl_lvl     : in  std_logic := '1';   -- niveau courant de FA_CTRL_REQ (P141), actif bas
-    ctrl_low_seen: in  std_logic := '0';   -- COLLANT : la ligne a ete vue basse au moins une fois
+    -- ⚠️ RENOMMES LE 2026-09-10. Ces deux bits ont porte le niveau de P141 et son
+    -- temoin collant jusqu'au 8 septembre, puis les temoins de vie du 6502 -- sans
+    -- que les noms suivent. Le 10 septembre, la panne cherchee ETAIT le niveau de
+    -- P141 : la balise l'aurait montre en clair si les noms avaient dit la verite.
+    cpu_alive    : in  std_logic := '1';   -- l'IRQ du 6502 a bouge depuis moins de 100 ms
+    io_alive     : in  std_logic := '0';   -- le port des lampes a ete ecrit depuis moins de 100 ms
     build_tag    : in  std_logic := '0';   -- etiquette de build, alternee a chaque gravure
     tx           : out std_logic := '1';
     -- Remise a un emetteur exterieur (own_uart = false). Defauts fournis pour que
@@ -84,7 +88,7 @@ begin
     -- ce qui est la seule question qu'on se pose apres une gravure, et qu'on a
     -- passe la soiree a ne pas pouvoir trancher (2026-09-07). Comparer deux
     -- fichiers .bin ne prouve rien : ca ne dit pas ce que le FPGA a charge.
-    o2 <= build_tag & ctrl_low_seen & ctrl_lvl & diag_esp & reset_l & is_80A & is_80B & game_running;
+    o2 <= build_tag & io_alive & cpu_alive & diag_esp & reset_l & is_80A & is_80B & game_running;
 
     -- ---------------------------------------------------------------------
     -- Mode historique : la balise est seule sur le fil et l'emet elle-meme.
