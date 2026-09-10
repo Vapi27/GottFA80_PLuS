@@ -62,3 +62,6 @@ attic_experiments/
 
 # Copies de travail : quel fichier fait foi doit rester sans ambiguite.
 attic_bench_*/
+
+# macOS
+.DS_Store
