@@ -2828,7 +2828,12 @@ snap_wr_addr_mux <= snap_wr_addr when snap_wr_en = '1' else esp_v_addr;
 snap_wr_data_mux <= snap_wr_data when snap_wr_en = '1' else esp_v_data;
 
 RAM_SNAP : entity work.ram_snoop
-generic map( clk_hz => 50000000, period_ms => 1000, n_bytes => 692 )   -- 640 RAM + 48 verre + 4 etat
+-- CADENCE DE L'INSTANTANE. Une trame = 1 + 692*2 = 1385 octets, soit 120 ms a 115200
+-- bauds : a 400 ms le lien est occupe a 30 %, et il porte AUSSI la balise et les codes
+-- son, ou l'instantane est en derniere priorite (voir sound_link). Ne pas descendre plus
+-- bas sans remesurer que la balise reste vivante -- le battement de coeur avait deja du
+-- passer de 50 ms a 1 s pour cette raison.
+generic map( clk_hz => 50000000, period_ms => 400, n_bytes => 692 )   -- 640 RAM + 48 verre + 4 etat
 port map(
 	clk => clk_50, rst => not reset_l,
 	wr_addr => snap_wr_addr_mux,
