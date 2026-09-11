@@ -532,6 +532,7 @@ signal ctrl_low_n  : integer range 0 to ctrl_low_max := 0;
 -- shared SPI bus (NOR/SD/EEPROM programming). Needed because outside diag the FPGA
 -- always drives MOSI/CLK, so holding reset alone never freed the bus.
 signal esp_bus     : std_logic := '0';
+signal lisy_bus_grant : std_logic := '0';   -- lisyctrl 0x33 BUSREQ : le bus est cede a l'ESP
 signal lisy_sclk, lisy_mosi, lisy_miso : std_logic;
 signal lisy_u4pb, lisy_u6pa, lisy_u6pb : std_logic_vector(7 downto 0);
   signal lisy_u5pa : std_logic_vector(3 downto 0);
@@ -1223,25 +1224,27 @@ slam <= '0' when opt_slam_fix_open = '1' else --slam open for late 80B games
 -- In diag mode the FPGA tri-states the SPI bus and becomes an SPI slave, the
 -- 6502 is held in reset, and lisyctrl drives the machine I/O. Default = inactive
 -- => behaviour is identical to the original. See LISYCTRL.md.
-esp_bus <= '1' when reset_sw_stable = '0' else '0';   -- ESP (or S8) asserts reset => bus is the ESP's
+-- L'ESP possede le bus quand la machine est en reset (voie historique) OU quand il l'a
+-- DEMANDE par le registre lisyctrl 0x33. Sans la seconde voie la premiere etait
+-- inatteignable depuis l'ESP : cette carte n'a aucun fil vers le reset du FPGA
+-- (releve de netlist, 2026-09-07), donc `esp_bus` ne montait jamais de son fait.
+esp_bus <= '1' when (reset_sw_stable = '0' or lisy_bus_grant = '1') else '0';
 MOSI <= 'Z' when (lisy_active = '1' or esp_bus = '1') else SDcard_MOSI when reset_l = '0' else EEprom_MOSI;
 CLK  <= 'Z' when (lisy_active = '1' or esp_bus = '1') else SDcard_CLK  when reset_l = '0' else EEprom_CLK;
--- 🔴 MISO EST LA SEULE DES TROIS A NE PAS CONNAITRE esp_bus, ET C'EST UN PIEGE.
--- MOSI et CLK se taisent sur (lisy_active or esp_bus) ; MISO, elle, est PILOTEE des
--- que lisy_active vaut '1' -- c'est la ligne de retour de lisyctrl. Consequence,
--- mesuree sur la machine le 2026-09-11 par lecture sous rappel haut puis bas :
---     hors diag : MOSI et CLK TENUES par le FPGA, MISO libre
---     en diag   : MOSI et CLK libres,            MISO TENUE HAUTE par lisy_miso
--- Il n'existe donc AUCUN etat ou l'ESP possede les quatre lignes. Il peut ECRIRE la
--- NOR des jeux (l'ecriture n'a pas besoin de MISO -- prouve le 31/08) mais il ne
--- pourra JAMAIS la relire : /api/nor/dump rend 0xFF, et c'est lisy_miso qu'il lit.
--- Ce n'est pas un defaut de cablage ni une NOR morte : c'est ce multiplexeur.
--- Le correctif tient en un mot -- ajouter esp_bus ici comme sur les deux lignes du
--- dessus -- mais il ne suffit pas : `esp_bus` ne monte que sur reset_sw_stable = '0',
--- et cette carte n'a AUCUN fil de l'ESP vers le reset du FPGA. Rendre la relecture
--- possible demande donc aussi un moyen pour l'ESP de DEMANDER esp_bus (registre
--- lisyctrl, ou motif long sur FA_CTRL_REQ). A faire ensemble, pas a moitie.
-MISO <= lisy_miso when lisy_active = '1' else 'Z';
+-- MISO EST PARTAGEE ENTRE DEUX USAGES, et l'ordre ci-dessous est le correctif du
+-- 2026-09-11. Elle est notre ligne de REPONSE lisyctrl des que lisy_active='1' ;
+-- elle est aussi le DO de la NOR des jeux que l'ESP doit pouvoir lire.
+-- Avant correctif, `esp_bus` etait absent d'ici alors qu'il est sur MOSI et CLK :
+--     hors diag : MOSI et CLK tenues par le FPGA, MISO libre
+--     en diag   : MOSI et CLK libres,            MISO tenue par lisy_miso
+-- soit AUCUN etat ou l'ESP possede les quatre lignes. Mesure sur machine (lecture de
+-- chaque ligne sous rappel haut puis bas, /api/nor/lignes) : c'est bien ce qui se
+-- passait, et le 0xFF que l'ESP relisait etait notre propre miso au repos -- pas une
+-- NOR muette. D'ou l'asymetrie restee sans reponse depuis le 31/08 : l'ecriture de la
+-- NOR marchait (elle n'a pas besoin de MISO), la relecture jamais.
+-- `esp_bus` passe DEVANT lisy_active : la cession est explicite et demandee, elle doit
+-- l'emporter sur l'usage par defaut.
+MISO <= 'Z' when esp_bus = '1' else lisy_miso when lisy_active = '1' else 'Z';
 lisy_sclk <= CLK;
 lisy_mosi <= MOSI;
 -- handshake to the ESP32 companion on the Debug pin: '1' = lisyctrl/diag mode is
@@ -1411,6 +1414,7 @@ port map(
 	o_U6_PA => lisy_u6pa, o_U6_PB => lisy_u6pb, o_segments => lisy_segments,
 	o_sound => lisy_sound5, o_sound_trig => lisy_sound_trig,
 	o_txt => lisy_txt,
+	o_bus_grant => lisy_bus_grant,                    -- 0x33 BUSREQ -> esp_bus -> MISO en 'Z' (Pstore)
 	o_tournament => tournament_mode,                  -- arms time-attack display + tourney_block (Pstore)
 	o_ta_start => ta_cfg_start, o_ta_decay => ta_cfg_decay,  -- time-attack start/decay -> countdown (Pstore)
 	i_DIP_Ret => '0' & DIP_Return, i_slam => slam, wd_tripped => open
@@ -1421,6 +1425,7 @@ end generate GEN_LISY;
 -- muxes fold to stock (lisy_active='0' => MISO=Z/input, MOSI/CLK=SD or EEPROM).
 GEN_NOLISY: if not lisy_enable generate
 	lisy_active <= '0';
+	lisy_bus_grant <= '0';   -- sans pont, personne ne peut demander le bus
 	lisy_miso   <= 'Z';
 	lisy_u4pb   <= (others => '0');
 	lisy_u6pa   <= (others => '0');

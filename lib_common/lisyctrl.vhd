@@ -26,6 +26,25 @@
 --   R 0x32 COIL_FAULT {b0 pulse-clamped,b1 refire-blocked,b2 wd-with-coil; b7..4 coil#}; W clears
 --   W 0x40..0x42 SEG_A/B/C (display segments)  W 0x43 U5 {b3..0 strobes, b7 sw_enable}
 --   W 0x44 SOUND (write System 80 sound code 0..31 -> play via gosof80)
+--   W 0x33 BUSREQ : ecrire 0x5A = CEDER LE BUS SPI PARTAGE A L'ESP (voir plus bas)
+--
+-- 0x33 BUSREQ -- pourquoi ce registre existe (Pstore, 2026-09-11).
+--   Le haut niveau relache MOSI et CLK des que `active`='1', mais il PILOTE MISO :
+--   c'est notre ligne de reponse. L'ESP peut donc ECRIRE la NOR des jeux et ne peut
+--   PAS la relire -- mesure sur machine : /api/nor/dump rendait 0xFF, qui etait notre
+--   propre `miso` au repos. Aucun etat ne donnait les quatre lignes a l'ESP.
+--   Ce registre ouvre cet etat : `o_bus_grant` monte, le haut niveau met MISO en 'Z'
+--   par `esp_bus`, et l'ESP possede le bus entier.
+--   🔴 IL COUPE AUSSI NOTRE DECODEUR SPI, et ce n'est pas un detail : ce pont n'a PAS
+--   de /CS, il delimite ses trames sur les silences. Les 16 ko de lecture NOR seraient
+--   donc lus comme des commandes -- 0x30 est « declencher une bobine ». Couper
+--   `enable` du spi_slave est la seule facon sure de ceder le fil.
+--   Consequence assumee : une fois cede, on ne nous parle plus, donc on ne peut plus
+--   nous demander de rendre. La restitution est AUTOMATIQUE, par deux voies :
+--     - `active` retombe (l'ESP relache FA_CTRL_REQ) -- la voie normale ;
+--     - un delai de garde (`bus_grant_ms`) -- le filet si l'ESP meurt en cours.
+--   Le chien de garde des sorties se declenche pendant ce temps (plus aucun trafic
+--   ne le nourrit) : les bobines retombent en repos. C'est le bon sens.
 
 library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
@@ -38,12 +57,16 @@ entity lisyctrl is
     gap_clocks    : integer := 64;         -- SPI frame gap (passed to spi_slave)
     scan_div      : integer := 5000;       -- clk cycles per switch strobe (~100us)
     max_pulse_ms  : integer := 150;        -- hard ceiling on a coil pulse (thermal guard)
+    bus_grant_ms  : integer := 30000;      -- 0x33 BUSREQ : duree MAXIMALE de la cession du bus
     refire_ms     : integer := 40;         -- min off-time between coil fires (anti machine-gun)
     sound_hold_ms : integer := 60          -- ms to hold the sound trigger high (level send)
   );
   port (
     clk        : in  std_logic;
     active     : in  std_logic;
+    -- '1' = le bus SPI partage est cede a l'ESP (registre 0x33). Le haut niveau
+    -- doit alors mettre MISO en haute impedance -- voir esp_bus dans SYS80.vhd.
+    o_bus_grant : out std_logic;
     -- SPI slave (the top routes the shared bus here when active)
     sclk       : in  std_logic;
     mosi       : in  std_logic;
@@ -86,6 +109,9 @@ architecture rtl of lisyctrl is
 
   -- register file
   signal ctrl     : std_logic_vector(7 downto 0) := x"00";  -- b0 outputs_en, b1 blink
+  -- 0x33 BUSREQ : cession du bus a l'ESP, bornee dans le temps.
+  signal grant     : std_logic := '0';
+  signal grant_ms  : integer range 0 to bus_grant_ms := 0;
   signal tourney_reg : std_logic_vector(7 downto 0) := x"00";  -- CTRL2 0x04 b0 tournament_mode (persists)
   -- time-attack config (persists into gameplay, defaults = the tourney_countdown generics: 1,000,000 / 10,000)
   signal ta_start_reg : std_logic_vector(23 downto 0) := x"0F4240";  -- TA_START 0x05..0x07 = 1,000,000
@@ -149,7 +175,9 @@ begin
   SPI : entity work.spi_slave
     generic map ( gap_clocks => gap_clocks )
     port map (
-      clk => clk, enable => active, sclk => sclk, mosi => mosi, miso => miso,
+      -- `not grant` : tant que le bus est cede, on ne decode plus rien. Sans cela le
+      -- trafic NOR de l'ESP serait lu comme des commandes sur un lien sans /CS.
+      clk => clk, enable => (active and not grant), sclk => sclk, mosi => mosi, miso => miso,
       rx_byte => rx_byte, rx_valid => rx_valid, rx_first => rx_first, tx_byte => tx_byte
     );
 
@@ -167,6 +195,9 @@ begin
     ms_now := false;
 
     if active = '0' then
+      -- Sortie du diagnostic : on reprend le bus. C'est la voie NORMALE de
+      -- restitution, celle que l'ESP declenche en relachant FA_CTRL_REQ.
+      grant <= '0'; grant_ms <= 0;
       cmd_seen <= '0'; coil_n <= 0; pulse_left <= 0;
       wd_cnt <= WD_MAX; wd_trip <= '0';
       refire_cnt <= 0; snd_hold <= 0; coil_fault <= x"00";
@@ -209,6 +240,10 @@ begin
                 end if;
               end if;
             when 16#32# => coil_fault <= x"00";        -- write clears coil-fault flags
+            -- 0x33 BUSREQ. Valeur magique exigee : ce registre coupe notre propre
+            -- ecoute, un octet errant ne doit pas pouvoir le declencher.
+            when 16#33# =>
+              if rx_byte = x"5A" then grant <= '1'; grant_ms <= bus_grant_ms; end if;
             when 16#44# => snd_code <= rx_byte(4 downto 0); snd_hold <= sound_hold_ms;  -- play sound
             when 16#20# to 16#25# => lamp_b(a - 16#20#) <= rx_byte;
             when 16#40# to 16#42# => seg_b (a - 16#40#) <= rx_byte;
@@ -221,6 +256,13 @@ begin
 
       -- coil pulse timer + cooldown + sound-hold + watchdog (per ms)
       if ms_now then
+        -- Delai de garde de la cession du bus. Le filet, pas la voie normale :
+        -- l'ESP est cense sortir du diagnostic quand il a fini, ce qui rend le bus
+        -- par `active`='0'. Ici on couvre le cas ou il ne revient jamais.
+        if grant = '1' then
+          if grant_ms > 0 then grant_ms <= grant_ms - 1;
+          else grant <= '0'; end if;
+        end if;
         if refire_cnt > 0 then refire_cnt <= refire_cnt - 1; end if;
         if snd_hold   > 0 then snd_hold   <= snd_hold   - 1; end if;
         if pulse_left > 0 then
@@ -349,6 +391,7 @@ begin
   -- sound: present the code + a level trigger (held sound_hold_ms) -> gosof80
   o_sound      <= snd_code;
   o_sound_trig <= '1' when snd_hold > 0 else '0';
+  o_bus_grant  <= grant;
   o_tournament <= tourney_reg(0);                    -- persists past diag exit (not reset on active=0)
   o_ta_start   <= ta_start_reg;                      -- time-attack start points (persists into gameplay)
   o_ta_decay   <= ta_decay_reg;                      -- time-attack decay/sec (persists into gameplay)
