@@ -1225,6 +1225,20 @@ slam <= '0' when opt_slam_fix_open = '1' else --slam open for late 80B games
 -- In diag mode the FPGA tri-states the SPI bus and becomes an SPI slave, the
 -- 6502 is held in reset, and lisyctrl drives the machine I/O. Default = inactive
 -- => behaviour is identical to the original. See LISYCTRL.md.
+-- ⚠️⚠️ ETAT AU 2026-09-11 SOIR : CE CORRECTIF FAIT CE QU'ON LUI DEMANDE ET TUE
+-- L'ATTRACT DU PLATEAU. L'ESP relit la NOR (16 384 octets identiques au catalogue,
+-- une premiere) mais le port des lampes n'est plus ecrit une fois le jeu relance.
+-- Constate sur le Hot Shots, confirme par retour a sys80_verre_16h21 (attract et
+-- lampes de retour). Le diff des synthetiques ne montre que `grant` et `grant_ms`
+-- en plus : c'est donc bien ICI que ca se joue, mecanisme encore inconnu.
+-- NE PAS REGRAVER CET ARBRE EN L'ETAT. Pistes a verifier d'abord, dans l'ordre :
+--   1. `bus_a_esp` deselectionne CS_EEprom des que grant='1' -- si grant reste
+--      colle (il ne retombe que sur active='0'), l'automate M95256 est prive de
+--      son bus et le jeu attend sa NVRAM ;
+--   2. `enable => (active and not grant)` sur le spi_slave : si grant est '1'
+--      hors diag, verifier que rien d'autre ne lit `grant` ;
+--   3. relire P_VIE : `io_alive` suit u6pb_src -- s'assurer que la source des
+--      lampes n'a pas change de multiplexeur par effet de bord.
 -- 🔴 DEUX SIGNAUX, ET C'EST TOUT L'INTERET. Les avoir confondus a produit une
 -- boucle qui s'annulait seule -- mesuree sur machine le 2026-09-11 :
 --   le registre levait `grant` -> esp_bus -> nor_flash mis en RESET
