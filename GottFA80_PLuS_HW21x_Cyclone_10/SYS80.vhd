@@ -63,6 +63,15 @@ entity SYS80 is
 		-- /api/ramsnap rend « error ». Eteint par defaut : l'instantane, qui donne
 		-- la RAM CMOS et donc les REGLAGES du jeu, vaut mieux au quotidien.
 		lamp_snoop_en : boolean := false;
+		-- 🔴 ESPION D'AFFICHEUR 80B -- FAUX PAR DEFAUT, IL CASSE LE LIEN.
+		-- Mesure du 2026-09-10 : avec disp80b_snoop_en=true, le lien FPGA->ESP devient
+		-- COMPLETEMENT muet -- zero octet en 16 s, balise comprise, alors que la synthese
+		-- passe (« All constraints were met », 93 % de slices). Recharger l'image sans lui
+		-- rend le lien immediatement. La cause n'est pas trouvee ; deux pistes non testees :
+		-- lire U5_pa_out(4) et (5), jusque-la inutilises, force la synthese a les produire
+		-- et peut deplacer un chemin du RIOT U5 ; et l'occupation a 93 % laisse peu de
+		-- marge de routage. NE PAS METTRE A true sans remesurer le lien.
+		disp80b_snoop_en : boolean := false;
 		-- Passe a GOSOF80 : coupe le generateur de sons d'attract (voir la-bas).
 		attract_snd_off : boolean := false;
 		-- Chemin de chargement du jeu. JP1 coupe sur cette carte => le FPGA n'a
@@ -568,10 +577,40 @@ signal snap_wr_data    : std_logic_vector(7 downto 0);  -- mirrored data byte
 -- (`MISO <= lisy_miso when lisy_active = '1'`), et le diagnostic tient le 6502 -- on
 -- lirait le verre d'une machine arretee. Ce lien-ci coule en jeu.
 -- Cout nul en memoire : l'image de ram_snoop est deja declaree sur 1024 octets.
-signal disp_ph         : integer range 0 to 3 := 3;    -- 0..2 = groupes A/B/C ; 3 = repos
+signal disp_ph         : integer range 0 to 4 := 0;    -- 0 echantillon, 1..3 groupes A/B/C, 4 etat
 signal disp_stb_d      : std_logic_vector(3 downto 0) := (others => '0');
 signal disp_seg_d      : std_logic_vector(1 to 24) := (others => '0');
 signal etat_ph         : integer range 0 to 3 := 0;
+-- Extinction inter-strobe (blanking) : entre deux digits, les 24 bits de segments
+-- passent a zero. En ecrivant en continu -- dix mille tours par milliseconde de
+-- multiplexage -- ces zeros ecrasaient les valeurs valides : la fenetre oscillait entre
+-- 0 et 6 octets sur 48 (mesure du 2026-09-10). On ne retient donc qu'un echantillon
+-- NON NUL. Consequence assumee : un digit reellement eteint garde sa derniere valeur,
+-- ce qui est exactement ce que fait l'oeil devant un afficheur multiplexe.
+signal disp_valide     : std_logic := '0';
+
+-- ESPION D'AFFICHEUR 80B (2026-09-10). Sur 80B le verre est ALPHANUMERIQUE et n'a rien
+-- du multiplexage 7 segments du System 80 : le 6502 pose un octet en DEUX quartets dans
+-- deux verrous, puis le pousse dans une ligne par une impulsion LD. L'espion 7 segments
+-- ci-dessus ne peut donc rien en dire -- le decodeur ASCII de glassview.c recevait des
+-- motifs de segments et rendait « F. G. F. » (constate au banc, DIP mis sur un titre 80B).
+-- Protocole repris de l'en-tete de lib_common/disp80b_diag.vhd, qui l'ECRIT en diagnostic
+-- (verifie contre LISY80 displays.c, PinMAME gts80.c et prom1.s) :
+--   PB(3:0) = quartet bas, front de PA4 -> PB(3:0) = quartet haut, front de PA5,
+--   puis impulsion BASSE de LD1 (PB4, ligne 1) ou LD2 (PB5, ligne 2).
+--   L'octet 0x01 en diffusion remet les deux pointeurs de colonne a zero.
+-- Les 40 caracteres vont aux indices 640..659 (ligne 1) et 660..679 (ligne 2) de la
+-- trame, ce que glassview.c lit par GLASS_OFF et GLASS_OFF + GLASS_COLS.
+signal d80_lo, d80_hi  : std_logic_vector(3 downto 0) := (others => '0');
+signal d80_ck1_d       : std_logic := '0';
+signal d80_ck2_d       : std_logic := '0';
+signal d80_ld1_d       : std_logic := '1';
+signal d80_ld2_d       : std_logic := '1';
+signal d80_i1          : integer range 0 to 19 := 0;
+signal d80_i2          : integer range 0 to 19 := 0;
+signal d80_wr_en       : std_logic := '0';
+signal d80_wr_addr     : std_logic_vector(9 downto 0) := (others => '0');
+signal d80_wr_data     : std_logic_vector(7 downto 0) := (others => '0');
 -- VERROU DE SLAM, a sens unique. ⚠️ La polarite du slam est DELIBEREMENT inconnue dans
 -- ce design : « whatever level the machine currently rests at is provably the NOT-slammed
 -- level for this ROM » (cf. le commentaire de slam_to_cpu). Un `if slam = '1'` aurait donc
@@ -590,6 +629,9 @@ signal disp_seg_i      : std_logic_vector(1 to 24);
 signal disp_wr_en      : std_logic := '0';
 signal disp_wr_addr    : std_logic_vector(9 downto 0) := (others => '0');
 signal disp_wr_data    : std_logic_vector(7 downto 0) := (others => '0');
+signal esp_v_en        : std_logic;
+signal esp_v_addr      : std_logic_vector(9 downto 0);
+signal esp_v_data      : std_logic_vector(7 downto 0);
 signal snap_wr_en_mux  : std_logic;
 signal snap_wr_addr_mux: std_logic_vector(9 downto 0);
 signal snap_wr_data_mux: std_logic_vector(7 downto 0);
@@ -2623,6 +2665,15 @@ snap_wr_data <= cpu_dout when snap_riot_wr = '1'
 -- Un octet par cycle libre, et JAMAIS quand le 6502 ecrit : la trame appartient
 -- d'abord a la RAM. A 50 MHz, les 52 octets sont rafraichis en quelques microsecondes,
 -- soit mille fois plus vite que le multiplexage du verre.
+-- ⚠️ BALAYAGE CONTINU, ET NON REACTION AU CHANGEMENT (revu le 2026-09-10 apres mesure).
+-- La premiere version repartait a zero des que le strobe OU les segments bougeaient, et
+-- n'ecrivait donc presque jamais : la fenetre recevait 0 a 6 octets sur 48, avec des
+-- valeurs melangees d'un strobe a l'autre. Les segments sont combinatoires et bougent en
+-- permanence -- attendre qu'ils se taisent ne marche pas.
+-- Ici un tour de cinq cycles, sans condition : on ECHANTILLONNE strobe et segments
+-- ensemble (phase 0, d'ou leur coherence), on ecrit les trois groupes, puis un octet
+-- d'etat. Cent nanosecondes par tour contre une milliseconde de multiplexage : chaque
+-- strobe est reecrit des milliers de fois avant de changer.
 P_DISP_SNOOP : process
 	variable a : natural;
 begin
@@ -2643,49 +2694,106 @@ begin
 		slam_seen <= '1';
 	end if;
 
-	if u5_pa_i /= disp_stb_d or disp_seg_i /= disp_seg_d then
-		-- le strobe ou les segments ont bouge : reemettre les trois groupes de ce strobe
-		disp_stb_d <= u5_pa_i;
-		disp_seg_d <= disp_seg_i;
-		disp_ph    <= 0;
-	elsif snap_wr_en = '0' then
-		if disp_ph <= 2 then
-			-- indice = 640 + strobe*3 + groupe (0 = A joueurs 1/2, 1 = B joueurs 3/4, 2 = C statut)
-			-- ⚠️ 768 ET NON 640. ram_snoop translate ses lectures : rd_addr = idx + 128
-			-- des que idx >= 384, pour couvrir la 5101 en 512..767. L'indice 640 de la
-			-- TRAME lit donc shadow(768). Ecrire en 640 remplissait une zone que
-			-- personne ne relit jamais. 768..819 est libre : la 5101 s'arrete a 767.
-			a := 768 + to_integer(unsigned(disp_stb_d)) * 3 + disp_ph;
-			disp_wr_addr <= std_logic_vector(to_unsigned(a, 10));
-			case disp_ph is
-				when 0      => disp_wr_data <= disp_seg_d(1 to 8);
-				when 1      => disp_wr_data <= disp_seg_d(9 to 16);
-				when others => disp_wr_data <= disp_seg_d(17 to 24);
-			end case;
-			disp_wr_en <= '1';
-			disp_ph    <= disp_ph + 1;
-		else
-			-- les quatre octets d'etat, a tour de role (688..691)
-			disp_wr_addr <= std_logic_vector(to_unsigned(816 + etat_ph, 10));   -- trame 688..691
-			case etat_ph is
-				-- b7..6 = "10" signature | b5 slam vu | b4 diag | b3 ta_full
-				-- b2 jeu en cours | b1 carte SD ok | b0 = 1 pour System 80/80A
-				when 0 => disp_wr_data <= "10" & slam_seen & lisy_active & ta_full
-				                          & game_running & SDcard_error & not80B;
-				when 1 => disp_wr_data <= U5_pa_out;
-				when 2 => disp_wr_data <= U5_pb_out;
-				when others => disp_wr_data <= "00" & gnum;
-			end case;
-			disp_wr_en <= '1';
-			etat_ph    <= (etat_ph + 1) mod 4;
-		end if;
+	if snap_wr_en = '0' then                 -- jamais quand le 6502 ecrit
+		case disp_ph is
+			when 0 =>
+				-- un seul instant pour les deux, sinon on ecrit les segments d'un
+				-- strobe a l'adresse d'un autre
+				disp_stb_d <= u5_pa_i;
+				disp_seg_d <= disp_seg_i;
+				if disp_seg_i = (disp_seg_i'range => '0') then
+					disp_valide <= '0';      -- extinction inter-strobe : ne rien ecrire
+				else
+					disp_valide <= '1';
+				end if;
+			when 1 | 2 | 3 =>
+				-- ⚠️ 768 ET NON 640 : ram_snoop lit rd_addr = idx + 128 des que
+				-- idx >= 384, pour couvrir la 5101 en 512..767. L'indice 640 de la
+				-- TRAME lit donc shadow(768). 768..819 est libre : la 5101 s'arrete a 767.
+				a := 768 + to_integer(unsigned(disp_stb_d)) * 3 + (disp_ph - 1);
+				disp_wr_addr <= std_logic_vector(to_unsigned(a, 10));
+				case disp_ph is
+					when 1      => disp_wr_data <= disp_seg_d(1 to 8);    -- A : joueurs 1/2
+					when 2      => disp_wr_data <= disp_seg_d(9 to 16);   -- B : joueurs 3/4
+					when others => disp_wr_data <= disp_seg_d(17 to 24);  -- C : statut
+				end case;
+				disp_wr_en <= disp_valide;
+			when others =>
+				-- les quatre octets d'etat, un par tour (trame 688..691)
+				disp_wr_addr <= std_logic_vector(to_unsigned(816 + etat_ph, 10));
+				case etat_ph is
+					-- b7..6 = "10" signature | b5 slam vu | b4 diag | b3 ta_full
+					-- b2 jeu en cours | b1 carte SD ok | b0 = 1 pour System 80/80A
+					when 0 => disp_wr_data <= "10" & slam_seen & lisy_active & ta_full
+					                          & game_running & SDcard_error & not80B;
+					when 1 => disp_wr_data <= U5_pa_out;
+					when 2 => disp_wr_data <= U5_pb_out;
+					when others => disp_wr_data <= "00" & gnum;
+				end case;
+				disp_wr_en <= '1';
+				etat_ph    <= (etat_ph + 1) mod 4;
+		end case;
+		if disp_ph = 4 then disp_ph <= 0; else disp_ph <= disp_ph + 1; end if;
 	end if;
 end process;
 
+-- Espion 80B : suit les deux verrous puis l'impulsion LD, et n'ecrit qu'un octet par
+-- caractere -- donc jamais en concurrence serieuse avec l'espion 7 segments, qui est de
+-- toute facon ignore des que not80B = '0'.
+GEN_DISP80B_SNOOP: if disp80b_snoop_en generate
+P_DISP80B_SNOOP : process
+	variable o : std_logic_vector(7 downto 0);
+begin
+	wait until rising_edge(clk_50);
+	d80_wr_en <= '0';
+	d80_ck1_d <= U5_pa_out(4);
+	d80_ck2_d <= U5_pa_out(5);
+	d80_ld1_d <= U5_pb_out(4);
+	d80_ld2_d <= U5_pb_out(5);
+
+	if reset_l = '0' then
+		d80_i1 <= 0; d80_i2 <= 0;
+	else
+		-- les deux quartets, sur le front montant de chaque horloge de verrou
+		if U5_pa_out(4) = '1' and d80_ck1_d = '0' then d80_lo <= U5_pb_out(3 downto 0); end if;
+		if U5_pa_out(5) = '1' and d80_ck2_d = '0' then d80_hi <= U5_pb_out(3 downto 0); end if;
+
+		o := d80_hi & d80_lo;
+		-- impulsion BASSE de LD : le registre est inverse par la carte, donc
+		-- registre bas = strobe physique
+		if U5_pb_out(4) = '0' and d80_ld1_d = '1' then
+			if o = x"01" then
+				d80_i1 <= 0; d80_i2 <= 0;        -- remise a zero des pointeurs
+			else
+				d80_wr_addr <= std_logic_vector(to_unsigned(768 + d80_i1, 10));
+				d80_wr_data <= o;
+				d80_wr_en   <= '1';
+				if d80_i1 = 19 then d80_i1 <= 0; else d80_i1 <= d80_i1 + 1; end if;
+			end if;
+		elsif U5_pb_out(5) = '0' and d80_ld2_d = '1' then
+			if o = x"01" then
+				d80_i1 <= 0; d80_i2 <= 0;
+			else
+				d80_wr_addr <= std_logic_vector(to_unsigned(768 + 20 + d80_i2, 10));
+				d80_wr_data <= o;
+				d80_wr_en   <= '1';
+				if d80_i2 = 19 then d80_i2 <= 0; else d80_i2 <= d80_i2 + 1; end if;
+			end if;
+		end if;
+	end if;
+end process;
+end generate GEN_DISP80B_SNOOP;
+
 -- Priorite au 6502 : l'espion ne parle que sur un cycle ou la RAM n'ecrit pas.
-snap_wr_en_mux   <= snap_wr_en or disp_wr_en;
-snap_wr_addr_mux <= snap_wr_addr when snap_wr_en = '1' else disp_wr_addr;
-snap_wr_data_mux <= snap_wr_data when snap_wr_en = '1' else disp_wr_data;
+-- Un seul espion remplit la fenetre, celui de la famille annoncee : sinon les deux
+-- s'ecraseraient et le decodeur lirait un melange.
+esp_v_en   <= disp_wr_en   when (not80B = '1' or not disp80b_snoop_en) else d80_wr_en;
+esp_v_addr <= disp_wr_addr when (not80B = '1' or not disp80b_snoop_en) else d80_wr_addr;
+esp_v_data <= disp_wr_data when (not80B = '1' or not disp80b_snoop_en) else d80_wr_data;
+
+snap_wr_en_mux   <= snap_wr_en or esp_v_en;
+snap_wr_addr_mux <= snap_wr_addr when snap_wr_en = '1' else esp_v_addr;
+snap_wr_data_mux <= snap_wr_data when snap_wr_en = '1' else esp_v_data;
 
 RAM_SNAP : entity work.ram_snoop
 generic map( clk_hz => 50000000, period_ms => 1000, n_bytes => 692 )   -- 640 RAM + 48 verre + 4 etat
