@@ -532,6 +532,7 @@ signal ctrl_low_n  : integer range 0 to ctrl_low_max := 0;
 -- shared SPI bus (NOR/SD/EEPROM programming). Needed because outside diag the FPGA
 -- always drives MOSI/CLK, so holding reset alone never freed the bus.
 signal esp_bus     : std_logic := '0';
+signal bus_a_esp   : std_logic := '0';   -- les BROCHES sont a l'ESP (sans toucher aux resets)
 signal lisy_bus_grant : std_logic := '0';   -- lisyctrl 0x33 BUSREQ : le bus est cede a l'ESP
 signal lisy_sclk, lisy_mosi, lisy_miso : std_logic;
 signal lisy_u4pb, lisy_u6pa, lisy_u6pb : std_logic_vector(7 downto 0);
@@ -1224,13 +1225,27 @@ slam <= '0' when opt_slam_fix_open = '1' else --slam open for late 80B games
 -- In diag mode the FPGA tri-states the SPI bus and becomes an SPI slave, the
 -- 6502 is held in reset, and lisyctrl drives the machine I/O. Default = inactive
 -- => behaviour is identical to the original. See LISYCTRL.md.
--- L'ESP possede le bus quand la machine est en reset (voie historique) OU quand il l'a
--- DEMANDE par le registre lisyctrl 0x33. Sans la seconde voie la premiere etait
--- inatteignable depuis l'ESP : cette carte n'a aucun fil vers le reset du FPGA
--- (releve de netlist, 2026-09-07), donc `esp_bus` ne montait jamais de son fait.
-esp_bus <= '1' when (reset_sw_stable = '0' or lisy_bus_grant = '1') else '0';
-MOSI <= 'Z' when (lisy_active = '1' or esp_bus = '1') else SDcard_MOSI when reset_l = '0' else EEprom_MOSI;
-CLK  <= 'Z' when (lisy_active = '1' or esp_bus = '1') else SDcard_CLK  when reset_l = '0' else EEprom_CLK;
+-- 🔴 DEUX SIGNAUX, ET C'EST TOUT L'INTERET. Les avoir confondus a produit une
+-- boucle qui s'annulait seule -- mesuree sur machine le 2026-09-11 :
+--   le registre levait `grant` -> esp_bus -> nor_flash mis en RESET
+--   -> `cpu_reset_l` = '0' -> reset_l = '0' -> `lisy_active` <= '0' (l.1388)
+--   -> lisyctrl efface `grant` -> esp_bus retombe -> nor_flash RECHARGE la ROM
+--   et pilote MOSI/CLK. La sonde voyait « MOSI et CLK tenus bas » et accusait
+--   le FPGA d'avoir garde le bus, alors qu'il venait de le reprendre a cause
+--   de la demande elle-meme.
+-- D'ou la separation :
+--   `esp_bus`   : la voie HISTORIQUE, machine en reset. Elle seule remet
+--                 nor_flash a zero, parce que la ROM va effectivement etre
+--                 rechargee -- c'est son role.
+--   `bus_a_esp` : « les BROCHES appartiennent a l'ESP ». Ne touche a aucun
+--                 reset. C'est ce qu'il faut pour lire la NOR : nor_flash a
+--                 fini son chargement depuis longtemps, il est au repos, et
+--                 ses sorties passent de toute facon par les multiplexeurs
+--                 ci-dessous -- il ne peut pas se battre avec l'ESP.
+esp_bus   <= '1' when reset_sw_stable = '0' else '0';
+bus_a_esp <= '1' when (esp_bus = '1' or lisy_bus_grant = '1') else '0';
+MOSI <= 'Z' when (lisy_active = '1' or bus_a_esp = '1') else SDcard_MOSI when reset_l = '0' else EEprom_MOSI;
+CLK  <= 'Z' when (lisy_active = '1' or bus_a_esp = '1') else SDcard_CLK  when reset_l = '0' else EEprom_CLK;
 -- MISO EST PARTAGEE ENTRE DEUX USAGES, et l'ordre ci-dessous est le correctif du
 -- 2026-09-11. Elle est notre ligne de REPONSE lisyctrl des que lisy_active='1' ;
 -- elle est aussi le DO de la NOR des jeux que l'ESP doit pouvoir lire.
@@ -1244,7 +1259,7 @@ CLK  <= 'Z' when (lisy_active = '1' or esp_bus = '1') else SDcard_CLK  when rese
 -- NOR marchait (elle n'a pas besoin de MISO), la relecture jamais.
 -- `esp_bus` passe DEVANT lisy_active : la cession est explicite et demandee, elle doit
 -- l'emporter sur l'usage par defaut.
-MISO <= 'Z' when esp_bus = '1' else lisy_miso when lisy_active = '1' else 'Z';
+MISO <= 'Z' when bus_a_esp = '1' else lisy_miso when lisy_active = '1' else 'Z';
 lisy_sclk <= CLK;
 lisy_mosi <= MOSI;
 -- handshake to the ESP32 companion on the Debug pin: '1' = lisyctrl/diag mode is
@@ -1256,8 +1271,8 @@ lisy_mosi <= MOSI;
 GEN_DBG_LVL: if (not esp_sound) and (not hybrid) generate
 Debug <= lisy_active;
 end generate GEN_DBG_LVL;
-CS_SDcard <= 'Z' when esp_bus = '1' else '1' when lisy_active = '1' else sd_cs_n;
-CS_EEprom <= '1' when (esp_bus = '1' or lisy_active = '1') else ee_cs_n;  -- v2: KEEP the M95256 deselected during the ESP grant (no board pull-up -> a floating CS could let it fight the NOR on MISO)
+CS_SDcard <= 'Z' when bus_a_esp = '1' else '1' when lisy_active = '1' else sd_cs_n;
+CS_EEprom <= '1' when (bus_a_esp = '1' or lisy_active = '1') else ee_cs_n;  -- v2: KEEP the M95256 deselected during the ESP grant (no board pull-up -> a floating CS could let it fight the NOR on MISO)
 -- Le /CS de la NOR des jeux (U6) est sur NOR_CS_FPGA/P35, PAS sur CS_SDcard/P56 :
 -- cette derniere ne compte que deux pastilles et n'atteint aucun composant. On la
 -- laisse desactivee. NOR_CS_FPGA se tait des que le bus ne nous appartient plus,
@@ -1265,7 +1280,7 @@ CS_EEprom <= '1' when (esp_bus = '1' or lisy_active = '1') else ee_cs_n;  -- v2:
 -- P35 reste en haute impedance tant que le FPGA ne pilote pas la NOR : c'est
 -- plus sur que le pulldown applique aux broches inutilisees, qui tirerait le
 -- /CS de la NOR contre son rappel. -- Pstore
-NOR_CS_FPGA <= 'Z' when (use_sd or esp_bus = '1' or lisy_active = '1' or reset_l = '1') else nor_cs_n;
+NOR_CS_FPGA <= 'Z' when (use_sd or bus_a_esp = '1' or lisy_active = '1' or reset_l = '1') else nor_cs_n;
 cpu_res_n <= '0' when lisy_active = '1' else reset_l;
 u6pa_src  <= lisy_u6pa when lisy_active = '1' else U6_pa_out;
 -- Tournament: neutralise a free-game solenoid (knocker) when armed. Placeholder code = no block. -- Pstore
@@ -1509,7 +1524,14 @@ port map(
 	--
 	i_clk		=> clk_50,	
 	-- Control/Data Signals,
-   i_Rst_L  => not (readingdips or esp_bus),  -- + esp_bus : ne pas cadencer un bus rendu a l'ESP -- Pstore
+   -- ⚠️ `esp_bus` ICI, PAS `bus_a_esp`, ET C'EST DELIBERE. Remettre ce chargeur a
+   -- zero lui fait baisser cpu_reset_l, donc reset_l, donc `lisy_active` (l.1388) --
+   -- ce qui efface la cession et la rend impossible. Mesure du 2026-09-11.
+   -- La voie historique (machine en reset) DOIT le reinitialiser : la ROM va etre
+   -- rechargee. Une simple cession de broches, non : a ce moment-la le chargement
+   -- est fini depuis longtemps, il est au repos, et ses sorties passent par les
+   -- multiplexeurs de la l.1247 -- il ne peut pas se battre avec l'ESP.
+   i_Rst_L  => not (readingdips or esp_bus),  -- voir ci-dessus -- Pstore
 	-- PMOD SPI Interface
    o_SPI_Clk  => SDcard_CLK,
    i_SPI_MISO => MISO,
