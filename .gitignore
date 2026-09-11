@@ -65,3 +65,7 @@ attic_bench_*/
 
 # macOS
 .DS_Store
+
+# Bancs d essai COMPILES (Mach-O). `sim/run_all.sh` les reconstruit depuis le VHDL :
+# 18 Mo de binaires qui changent a chaque simulation, dans un depot de sources.
+/tb_*
