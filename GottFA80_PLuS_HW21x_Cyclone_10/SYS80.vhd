@@ -80,7 +80,7 @@ entity SYS80 is
 		-- Reste donc : la simple PRESENCE du process, ou le routage a 94 %. Piste non
 		-- testee : retirer le mux esp_v_* et laisser le process tourner a vide.
 		-- NE PAS METTRE A true sans remesurer le lien.
-		disp80b_snoop_en : boolean := false;
+		disp80b_snoop_en : boolean := true;
 		-- Passe a GOSOF80 : coupe le generateur de sons d'attract (voir la-bas).
 		attract_snd_off : boolean := false;
 		-- Chemin de chargement du jeu. JP1 coupe sur cette carte => le FPGA n'a
@@ -2752,8 +2752,14 @@ P_DISP80B_SNOOP : process
 begin
 	wait until rising_edge(clk_50);
 	d80_wr_en <= '0';
-	d80_ld1_d <= U5_pb_out(4);
-	d80_ld2_d <= U5_pb_out(5);
+	-- 🔴 LIRE `u5pb_disp`, JAMAIS `U5_pb_out` (bissection du 2026-09-11). Un process qui ne
+	-- fait QUE `d80_ld1_d <= U5_pb_out(4)` -- rien d'autre, ni compteur ni ecriture -- tue le
+	-- lien FPGA->ESP : zero octet, balise comprise, sans la moindre erreur de synthese. Le
+	-- meme process sur `u5pb_disp`, deja derive et utilise par le chemin d'affichage, laisse
+	-- le lien intact. `U5_pb_out` sort du RIOT cadence par cpu_clk ; y ajouter une charge
+	-- depuis ce process a 50 MHz casse quelque chose que les contraintes ne voient pas.
+	d80_ld1_d <= u5pb_disp(4);
+	d80_ld2_d <= u5pb_disp(5);
 
 	if reset_l = '0' then
 		d80_i1 <= 0; d80_i2 <= 0;
@@ -2768,7 +2774,7 @@ begin
 		o := Din_Seg_B & Din_Seg_A;      -- quartet haut (PA5) & quartet bas (PA4)
 
 		-- impulsion BASSE de LD : la carte inverse, donc registre bas = strobe physique
-		if U5_pb_out(4) = '0' and d80_ld1_d = '1' then
+		if u5pb_disp(4) = '0' and d80_ld1_d = '1' then
 			if o = x"01" then
 				d80_i1 <= 0; d80_i2 <= 0;
 			else
@@ -2777,7 +2783,7 @@ begin
 				d80_wr_en   <= '1';
 				if d80_i1 = 19 then d80_i1 <= 0; else d80_i1 <= d80_i1 + 1; end if;
 			end if;
-		elsif U5_pb_out(5) = '0' and d80_ld2_d = '1' then
+		elsif u5pb_disp(5) = '0' and d80_ld2_d = '1' then
 			if o = x"01" then
 				d80_i1 <= 0; d80_i2 <= 0;
 			else
@@ -2794,9 +2800,15 @@ end generate GEN_DISP80B_SNOOP;
 -- Priorite au 6502 : l'espion ne parle que sur un cycle ou la RAM n'ecrit pas.
 -- Un seul espion remplit la fenetre, celui de la famille annoncee : sinon les deux
 -- s'ecraseraient et le decodeur lirait un melange.
-esp_v_en   <= disp_wr_en   when (not80B = '1' or not disp80b_snoop_en) else d80_wr_en;
-esp_v_addr <= disp_wr_addr when (not80B = '1' or not disp80b_snoop_en) else d80_wr_addr;
-esp_v_data <= disp_wr_data when (not80B = '1' or not disp80b_snoop_en) else d80_wr_data;
+-- 🔴 LES DEUX ESPIONS ECRIVENT, SANS MUX EXCLUSIF. Seconde cause trouvee le 2026-09-11 :
+-- un mux qui COUPAIT l'espion System 80 selon la famille tuait le lien, meme avec des
+-- lectures saines. L'espion 80B a la priorite quand il a un caractere a poser -- une
+-- poignee de cycles par trame -- et celui du System 80 ecrit le reste du temps. Les deux
+-- visent des indices differents (768..815 contre 768..819), donc ils ne se marchent pas
+-- dessus : c'est la famille annoncee qui decide lequel le decodeur lira.
+esp_v_en   <= disp_wr_en or d80_wr_en;
+esp_v_addr <= d80_wr_addr when d80_wr_en = '1' else disp_wr_addr;
+esp_v_data <= d80_wr_data when d80_wr_en = '1' else disp_wr_data;
 
 snap_wr_en_mux   <= snap_wr_en or esp_v_en;
 snap_wr_addr_mux <= snap_wr_addr when snap_wr_en = '1' else esp_v_addr;
