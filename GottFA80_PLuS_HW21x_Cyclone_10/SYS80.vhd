@@ -1226,6 +1226,21 @@ slam <= '0' when opt_slam_fix_open = '1' else --slam open for late 80B games
 esp_bus <= '1' when reset_sw_stable = '0' else '0';   -- ESP (or S8) asserts reset => bus is the ESP's
 MOSI <= 'Z' when (lisy_active = '1' or esp_bus = '1') else SDcard_MOSI when reset_l = '0' else EEprom_MOSI;
 CLK  <= 'Z' when (lisy_active = '1' or esp_bus = '1') else SDcard_CLK  when reset_l = '0' else EEprom_CLK;
+-- 🔴 MISO EST LA SEULE DES TROIS A NE PAS CONNAITRE esp_bus, ET C'EST UN PIEGE.
+-- MOSI et CLK se taisent sur (lisy_active or esp_bus) ; MISO, elle, est PILOTEE des
+-- que lisy_active vaut '1' -- c'est la ligne de retour de lisyctrl. Consequence,
+-- mesuree sur la machine le 2026-09-11 par lecture sous rappel haut puis bas :
+--     hors diag : MOSI et CLK TENUES par le FPGA, MISO libre
+--     en diag   : MOSI et CLK libres,            MISO TENUE HAUTE par lisy_miso
+-- Il n'existe donc AUCUN etat ou l'ESP possede les quatre lignes. Il peut ECRIRE la
+-- NOR des jeux (l'ecriture n'a pas besoin de MISO -- prouve le 31/08) mais il ne
+-- pourra JAMAIS la relire : /api/nor/dump rend 0xFF, et c'est lisy_miso qu'il lit.
+-- Ce n'est pas un defaut de cablage ni une NOR morte : c'est ce multiplexeur.
+-- Le correctif tient en un mot -- ajouter esp_bus ici comme sur les deux lignes du
+-- dessus -- mais il ne suffit pas : `esp_bus` ne monte que sur reset_sw_stable = '0',
+-- et cette carte n'a AUCUN fil de l'ESP vers le reset du FPGA. Rendre la relecture
+-- possible demande donc aussi un moyen pour l'ESP de DEMANDER esp_bus (registre
+-- lisyctrl, ou motif long sur FA_CTRL_REQ). A faire ensemble, pas a moitie.
 MISO <= lisy_miso when lisy_active = '1' else 'Z';
 lisy_sclk <= CLK;
 lisy_mosi <= MOSI;
