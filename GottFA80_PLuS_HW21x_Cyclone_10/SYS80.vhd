@@ -556,6 +556,43 @@ signal snap_5101_wr    : std_logic;                     -- 5101 (Z5) write
 signal snap_wr_en      : std_logic;                     -- either of the above
 signal snap_wr_addr    : std_logic_vector(9 downto 0);  -- shadow index (see ram_snoop header)
 signal snap_wr_data    : std_logic_vector(7 downto 0);  -- mirrored data byte
+
+-- ESPION D'AFFICHEUR (2026-09-10). Le firmware attend depuis le 22/08 une fenetre de
+-- 48 octets a l'indice 640 de la trame d'instantane, plus quatre octets d'etat --
+-- `LISY_SNAP_DISP` et `LISY_SNAP_FAM` dans lisy.h, et tout le decodeur 7 segments de
+-- glassview.c est ecrit. RIEN ne les servait : `ram_snoop` s'arretait a 640 valeurs, et
+-- le miroir du verre restait vide en n'affichant que le numero de jeu, qui vient de la
+-- balise. Verifie le 2026-09-10 : aucun `disp_snoop.vhd` n'a jamais existe, dans aucun
+-- arbre ni dans l'historique des quatre depots.
+-- Pourquoi ici et pas par LISY : le FPGA ne repond sur ce bus qu'en mode diagnostic
+-- (`MISO <= lisy_miso when lisy_active = '1'`), et le diagnostic tient le 6502 -- on
+-- lirait le verre d'une machine arretee. Ce lien-ci coule en jeu.
+-- Cout nul en memoire : l'image de ram_snoop est deja declaree sur 1024 octets.
+signal disp_ph         : integer range 0 to 3 := 3;    -- 0..2 = groupes A/B/C ; 3 = repos
+signal disp_stb_d      : std_logic_vector(3 downto 0) := (others => '0');
+signal disp_seg_d      : std_logic_vector(1 to 24) := (others => '0');
+signal etat_ph         : integer range 0 to 3 := 0;
+-- VERROU DE SLAM, a sens unique. ⚠️ La polarite du slam est DELIBEREMENT inconnue dans
+-- ce design : « whatever level the machine currently rests at is provably the NOT-slammed
+-- level for this ROM » (cf. le commentaire de slam_to_cpu). Un `if slam = '1'` aurait donc
+-- leve ce bit des la mise sous tension sur une machine au repos haut -- et glassview
+-- affiche « SLAM » A LA PLACE du verre quand il est leve : le miroir serait inutilisable.
+-- On apprend donc le niveau de repos 2 s apres la sortie de reset, et on ne retient
+-- qu'un ECART par rapport a lui.
+signal slam_seen       : std_logic := '0';
+signal slam_ref        : std_logic := '0';                -- niveau de repos, appris
+signal slam_armed      : std_logic := '0';
+signal slam_cnt        : unsigned(26 downto 0) := (others => '0');   -- 2 s a 50 MHz
+-- Un port `out` ne se relit pas en VHDL : ces deux signaux internes portent ce qui part
+-- vers le verre, et les ports en sont de simples recopies (voir plus bas).
+signal u5_pa_i         : std_logic_vector(3 downto 0);
+signal disp_seg_i      : std_logic_vector(1 to 24);
+signal disp_wr_en      : std_logic := '0';
+signal disp_wr_addr    : std_logic_vector(9 downto 0) := (others => '0');
+signal disp_wr_data    : std_logic_vector(7 downto 0) := (others => '0');
+signal snap_wr_en_mux  : std_logic;
+signal snap_wr_addr_mux: std_logic_vector(9 downto 0);
+signal snap_wr_data_mux: std_logic_vector(7 downto 0);
 signal snap_data_s     : std_logic_vector(7 downto 0);  -- byte offered to sound_link
 signal snap_req_s      : std_logic;
 signal snap_ack_s      : std_logic;
@@ -1910,13 +1947,15 @@ port map(
 -- path is clocked by U5_pa_out(4)/(5) and U5_pb_out only -- PA(3 downto 0)
 -- cannot latch anything into it -- and with the 80B gate on disp_segments below
 -- the data lines no longer carry banner patterns either.
-U5_PA(3 downto 0) <= lisy_u5pa when (lisy_active='1' and not80B='1') else U5_pa_out(3 downto 0) when (game_running='1' and ta_full='0') else bm_digit_strobe;  -- only a FULL overlay steals the strobes
+u5_pa_i <= lisy_u5pa when (lisy_active='1' and not80B='1') else U5_pa_out(3 downto 0) when (game_running='1' and ta_full='0') else bm_digit_strobe;  -- only a FULL overlay steals the strobes
 
 -- merge the injected character into the ROM's own segment stream: exactly one
 -- group, exactly during the digit strobes that address the chosen display.
 -- ta_seg bit 8 is the Gottlieb comma line and is '0' for every glyph, so the
 -- injected digits carry no comma -- same as the boot banner does today.
 segments_inj(1 to 8)   <= ta_seg when (ta_part = '1' and ta_hit_a = '1') else segments_80(1 to 8);
+U5_PA(3 downto 0) <= u5_pa_i;
+
 segments_inj(9 to 16)  <= ta_seg when (ta_part = '1' and ta_hit_b = '1') else segments_80(9 to 16);
 segments_inj(17 to 24) <= ta_seg when (ta_part = '1' and ta_hit_c = '1') else segments_80(17 to 24);
 
@@ -1943,13 +1982,13 @@ segments_inj(17 to 24) <= ta_seg when (ta_part = '1' and ta_hit_c = '1') else se
 -- LED_SDcard pin (LED_SDcard <= SDcard_error) and, in the ESP builds, the
 -- machine simply never leaves reset -- which is the same "no game" symptom the
 -- banner was there to explain.
-disp_segments <=
-	lisy_segments when (lisy_active = '1' and not80B = '1') else  -- numeric System-80 diag display test
+disp_seg_i <=
+lisy_segments when (lisy_active = '1' and not80B = '1') else  -- numeric System-80 diag display test
 	bm_segments when not80B = '1' and (( ta_full = '1' ) or ( game_running = '0' and U5_pb_out(6) = '1') or SDcard_error = '0') else
 	segments_inj when not80B = '1' else   -- = segments_80, countdown merged in when ta_part='1'
    segments_80B;
+disp_segments <= disp_seg_i;
 
-	
 --segments
 sn74175_80_1: entity work.sn74175 
 port map(   
@@ -2445,25 +2484,6 @@ GEN_ESP_SND : if esp_sound generate
 -- The two selects are mutually exclusive by construction (RIOT needs
 -- cpu_addr(13 downto 11)="000", the 5101 needs "011"), so the mux below can never
 -- drop a write; the RIOT branch takes priority only as a defensive default.
-snap_riot_wr <= (U4_RAM_cs or U5_RAM_cs or U6_RAM_cs) and not cpu_wr_n;
-snap_5101_wr <= r5101_cs and not cpu_wr_n;
-snap_wr_en   <= snap_riot_wr or snap_5101_wr;
-snap_wr_addr <= '0' & cpu_addr(8 downto 0) when snap_riot_wr = '1'
-                else "10" & cpu_addr(7 downto 0);
-snap_wr_data <= cpu_dout when snap_riot_wr = '1'
-                else "0000" & cpu_dout(3 downto 0);
-
-RAM_SNAP : entity work.ram_snoop
-generic map( clk_hz => 50000000, period_ms => 1000, n_bytes => 640 )
-port map(
-	clk => clk_50, rst => not reset_l,
-	wr_addr => snap_wr_addr,
-	wr_data => snap_wr_data,
-	wr_en   => snap_wr_en,
-	snap_data => snap_data_s,
-	snap_req  => snap_req_s,
-	snap_ack  => snap_ack_s
-);
 
 SND_LINK : entity work.sound_link
 -- ⚠️ BATTEMENT DE COEUR A 1 s, ET NON 50 ms (defaut du module).
@@ -2506,16 +2526,12 @@ port map(
 	rxc  => dinj_rxc,                                 -- 0xB0 | deframed-byte count (0xB0..0xBE)
 	snap_data => snap_data_s,                         -- RAM snapshot frame (0xBF + 1280 nibble bytes)
 	snap_req  => snap_req_s,
-	snap_ack  => snap_ack_s,
+	snap_ack  => lamp_ack_s,
 	bcn_frame => bcn_frame_s,                         -- balise remise par game_beacon
 	bcn_req   => bcn_req_s,
 	bcn_ack   => bcn_ack_s,
 	tx => sl_tx
 );
--- Retour d'acquittement vers ram_snoop. L'instance qui le fournissait
--- (GEN_ESP_SND) n'est pas generee en hybride : sans cette ligne, snap_ack_s
--- reste flottant et l'instantane memoire ne repart jamais.
-snap_ack_s <= lamp_ack_s when not lamp_snoop_en else '0';
 Debug    <= sl_tx;
 -- Audio_RX/PIN_2 is now an INPUT (ESP GPIO9 display-inject UART TX is wired to it).
 -- L'ETAGE AUDIO DE LA PORTEUSE, RENDU A L'ESP.
@@ -2576,6 +2592,118 @@ port map(
 -- reste une pointe de touche pour l'oscilloscope, pas un chemin vers l'ESP.
 Debug <= sl_tx;
 end generate GEN_HYB_LINK;
+
+
+-- Capture des ecritures du 6502 pour l'instantane. ⚠️ Ces cinq lignes etaient aussi
+-- dans GEN_ESP_SND : en hybride, snap_wr_en restait a sa valeur initiale et la trame
+-- ne portait que des zeros pour les 640 octets de RAM (mesure du 2026-09-10 : 0/640
+-- non nuls, alors que le 6502 tournait). Hors branche desormais.
+snap_riot_wr <= (U4_RAM_cs or U5_RAM_cs or U6_RAM_cs) and not cpu_wr_n;
+snap_5101_wr <= r5101_cs and not cpu_wr_n;
+snap_wr_en   <= snap_riot_wr or snap_5101_wr;
+snap_wr_addr <= '0' & cpu_addr(8 downto 0) when snap_riot_wr = '1'
+                else "10" & cpu_addr(7 downto 0);
+snap_wr_data <= cpu_dout when snap_riot_wr = '1'
+                else "0000" & cpu_dout(3 downto 0);
+
+-- ========================================================================
+-- INSTANTANE MEMOIRE + ESPION D'AFFICHEUR -- HORS DE TOUTE BRANCHE.
+-- 🔴 Mesure du 2026-09-10 : RAM_SNAP etait enferme dans GEN_ESP_SND, donc ABSENT
+-- en hybride (esp_sound=false) -- la configuration de la carte Smart FA. Rien ne
+-- produisait la trame : snap_req restait a '0', XST elaguait snap_ack a une
+-- constante (« FF/Latch <snap_ack> has a constant value of 0 »), lamp_ack_s se
+-- retrouvait sans charge, et le miroir du verre etait vide -- il n'affichait que le
+-- numero de jeu, qui vient de la balise. Un pansement avait ete pose sur
+-- l'acquittement, DANS LA MEME BRANCHE ABSENTE : il ne pouvait rien reparer,
+-- puisque ce n'est pas l'acquittement qui manquait mais le PRODUCTEUR.
+-- L'acquittement passe desormais par lamp_ack_s dans les deux modes (SND_LINK et
+-- SND_LINK_H sont exclusifs), donc snap_ack_s garde un pilote unique.
+-- ========================================================================
+
+-- Un octet par cycle libre, et JAMAIS quand le 6502 ecrit : la trame appartient
+-- d'abord a la RAM. A 50 MHz, les 52 octets sont rafraichis en quelques microsecondes,
+-- soit mille fois plus vite que le multiplexage du verre.
+P_DISP_SNOOP : process
+	variable a : natural;
+begin
+	wait until rising_edge(clk_50);
+	disp_wr_en <= '0';
+
+	-- apprentissage du niveau de repos du slam, puis detection d'ecart
+	if reset_l = '0' then
+		slam_armed <= '0'; slam_cnt <= (others => '0'); slam_seen <= '0';
+	elsif slam_armed = '0' then
+		if slam_cnt = 100000000 then
+			slam_ref   <= slam;
+			slam_armed <= '1';
+		else
+			slam_cnt <= slam_cnt + 1;
+		end if;
+	elsif slam /= slam_ref then
+		slam_seen <= '1';
+	end if;
+
+	if u5_pa_i /= disp_stb_d or disp_seg_i /= disp_seg_d then
+		-- le strobe ou les segments ont bouge : reemettre les trois groupes de ce strobe
+		disp_stb_d <= u5_pa_i;
+		disp_seg_d <= disp_seg_i;
+		disp_ph    <= 0;
+	elsif snap_wr_en = '0' then
+		if disp_ph <= 2 then
+			-- indice = 640 + strobe*3 + groupe (0 = A joueurs 1/2, 1 = B joueurs 3/4, 2 = C statut)
+			-- ⚠️ 768 ET NON 640. ram_snoop translate ses lectures : rd_addr = idx + 128
+			-- des que idx >= 384, pour couvrir la 5101 en 512..767. L'indice 640 de la
+			-- TRAME lit donc shadow(768). Ecrire en 640 remplissait une zone que
+			-- personne ne relit jamais. 768..819 est libre : la 5101 s'arrete a 767.
+			a := 768 + to_integer(unsigned(disp_stb_d)) * 3 + disp_ph;
+			disp_wr_addr <= std_logic_vector(to_unsigned(a, 10));
+			case disp_ph is
+				when 0      => disp_wr_data <= disp_seg_d(1 to 8);
+				when 1      => disp_wr_data <= disp_seg_d(9 to 16);
+				when others => disp_wr_data <= disp_seg_d(17 to 24);
+			end case;
+			disp_wr_en <= '1';
+			disp_ph    <= disp_ph + 1;
+		else
+			-- les quatre octets d'etat, a tour de role (688..691)
+			disp_wr_addr <= std_logic_vector(to_unsigned(816 + etat_ph, 10));   -- trame 688..691
+			case etat_ph is
+				-- b7..6 = "10" signature | b5 slam vu | b4 diag | b3 ta_full
+				-- b2 jeu en cours | b1 carte SD ok | b0 = 1 pour System 80/80A
+				when 0 => disp_wr_data <= "10" & slam_seen & lisy_active & ta_full
+				                          & game_running & SDcard_error & not80B;
+				when 1 => disp_wr_data <= U5_pa_out;
+				when 2 => disp_wr_data <= U5_pb_out;
+				when others => disp_wr_data <= "00" & gnum;
+			end case;
+			disp_wr_en <= '1';
+			etat_ph    <= (etat_ph + 1) mod 4;
+		end if;
+	end if;
+end process;
+
+-- Priorite au 6502 : l'espion ne parle que sur un cycle ou la RAM n'ecrit pas.
+snap_wr_en_mux   <= snap_wr_en or disp_wr_en;
+snap_wr_addr_mux <= snap_wr_addr when snap_wr_en = '1' else disp_wr_addr;
+snap_wr_data_mux <= snap_wr_data when snap_wr_en = '1' else disp_wr_data;
+
+RAM_SNAP : entity work.ram_snoop
+generic map( clk_hz => 50000000, period_ms => 1000, n_bytes => 692 )   -- 640 RAM + 48 verre + 4 etat
+port map(
+	clk => clk_50, rst => not reset_l,
+	wr_addr => snap_wr_addr_mux,
+	wr_data => snap_wr_data_mux,
+	wr_en   => snap_wr_en_mux,
+	snap_data => snap_data_s,
+	snap_req  => snap_req_s,
+	snap_ack  => snap_ack_s
+);
+
+-- Retour d'acquittement vers ram_snoop. L'instance qui le fournissait
+-- (GEN_ESP_SND) n'est pas generee en hybride : sans cette ligne, snap_ack_s
+-- reste flottant et l'instantane memoire ne repart jamais.
+snap_ack_s <= lamp_ack_s when not lamp_snoop_en else '0';
+
  	
 	
 	
