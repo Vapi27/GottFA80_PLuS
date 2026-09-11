@@ -68,9 +68,18 @@ entity SYS80 is
 		-- COMPLETEMENT muet -- zero octet en 16 s, balise comprise, alors que la synthese
 		-- passe (« All constraints were met », 93 % de slices). Recharger l'image sans lui
 		-- rend le lien immediatement. La cause n'est pas trouvee ; deux pistes non testees :
-		-- lire U5_pa_out(4) et (5), jusque-la inutilises, force la synthese a les produire
-		-- et peut deplacer un chemin du RIOT U5 ; et l'occupation a 93 % laisse peu de
-		-- marge de routage. NE PAS METTRE A true sans remesurer le lien.
+		-- BISSECTION DU 2026-09-11, trois pistes ELIMINEES par la mesure -- ne pas les
+		-- repayer :
+		--   1. le multiplexeur de famille : le lien meurt AUSSI en System 80, ou le mux
+		--      ignore completement cet espion ;
+		--   2. le chemin d'ecriture : une variante ou le process LIT tout mais n'ECRIT
+		--      jamais tue le lien pareillement ;
+		--   3. la lecture de U5_pa_out(4)/(5) : reecrit pour lire les sorties deja
+		--      verrouillees (Din_Seg_A/B, les sn74175 sont synchrones sur clk_50 et
+		--      capturent exactement les deux quartets) -- le lien meurt encore.
+		-- Reste donc : la simple PRESENCE du process, ou le routage a 94 %. Piste non
+		-- testee : retirer le mux esp_v_* et laisser le process tourner a vide.
+		-- NE PAS METTRE A true sans remesurer le lien.
 		disp80b_snoop_en : boolean := false;
 		-- Passe a GOSOF80 : coupe le generateur de sons d'attract (voir la-bas).
 		attract_snd_off : boolean := false;
@@ -601,9 +610,6 @@ signal disp_valide     : std_logic := '0';
 --   L'octet 0x01 en diffusion remet les deux pointeurs de colonne a zero.
 -- Les 40 caracteres vont aux indices 640..659 (ligne 1) et 660..679 (ligne 2) de la
 -- trame, ce que glassview.c lit par GLASS_OFF et GLASS_OFF + GLASS_COLS.
-signal d80_lo, d80_hi  : std_logic_vector(3 downto 0) := (others => '0');
-signal d80_ck1_d       : std_logic := '0';
-signal d80_ck2_d       : std_logic := '0';
 signal d80_ld1_d       : std_logic := '1';
 signal d80_ld2_d       : std_logic := '1';
 signal d80_i1          : integer range 0 to 19 := 0;
@@ -2746,24 +2752,25 @@ P_DISP80B_SNOOP : process
 begin
 	wait until rising_edge(clk_50);
 	d80_wr_en <= '0';
-	d80_ck1_d <= U5_pa_out(4);
-	d80_ck2_d <= U5_pa_out(5);
 	d80_ld1_d <= U5_pb_out(4);
 	d80_ld2_d <= U5_pb_out(5);
 
 	if reset_l = '0' then
 		d80_i1 <= 0; d80_i2 <= 0;
 	else
-		-- les deux quartets, sur le front montant de chaque horloge de verrou
-		if U5_pa_out(4) = '1' and d80_ck1_d = '0' then d80_lo <= U5_pb_out(3 downto 0); end if;
-		if U5_pa_out(5) = '1' and d80_ck2_d = '0' then d80_hi <= U5_pb_out(3 downto 0); end if;
+		-- ⚠️ ON NE SUIT PLUS LES FRONTS DE U5_pa_out(4)/(5) SOI-MEME. Les deux verrous
+		-- sn74175 du chemin d'affichage les capturent DEJA : `Din_Seg_A` porte
+		-- U5_pb_out(3:0) au front de PA4, `Din_Seg_B` au front de PA5 (le module est
+		-- synchrone sur clk_50, et le double `not` de D/Qn s'annule). Lire ces sorties
+		-- au lieu des entrees evite d'ajouter une charge sur des signaux qui, mesure le
+		-- 2026-09-10, tuaient le lien FPGA->ESP des qu'on y touchait -- sans la moindre
+		-- erreur de synthese, et meme quand le resultat n'etait pas utilise.
+		o := Din_Seg_B & Din_Seg_A;      -- quartet haut (PA5) & quartet bas (PA4)
 
-		o := d80_hi & d80_lo;
-		-- impulsion BASSE de LD : le registre est inverse par la carte, donc
-		-- registre bas = strobe physique
+		-- impulsion BASSE de LD : la carte inverse, donc registre bas = strobe physique
 		if U5_pb_out(4) = '0' and d80_ld1_d = '1' then
 			if o = x"01" then
-				d80_i1 <= 0; d80_i2 <= 0;        -- remise a zero des pointeurs
+				d80_i1 <= 0; d80_i2 <= 0;
 			else
 				d80_wr_addr <= std_logic_vector(to_unsigned(768 + d80_i1, 10));
 				d80_wr_data <= o;
