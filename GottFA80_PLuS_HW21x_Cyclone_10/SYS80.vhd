@@ -2723,7 +2723,7 @@ begin
 					when 2      => disp_wr_data <= disp_seg_d(9 to 16);   -- B : joueurs 3/4
 					when others => disp_wr_data <= disp_seg_d(17 to 24);  -- C : statut
 				end case;
-				disp_wr_en <= disp_valide;
+				disp_wr_en <= disp_valide and not80B;        -- muet en 80B : plage partagee
 			when others =>
 				-- les quatre octets d'etat, un par tour (trame 688..691)
 				disp_wr_addr <= std_logic_vector(to_unsigned(816 + etat_ph, 10));
@@ -2736,7 +2736,7 @@ begin
 					when 2 => disp_wr_data <= U5_pb_out;
 					when others => disp_wr_data <= "00" & gnum;
 				end case;
-				disp_wr_en <= '1';
+				disp_wr_en <= '1';                           -- les 4 octets d'etat : les deux familles en ont besoin
 				etat_ph    <= (etat_ph + 1) mod 4;
 		end case;
 		if disp_ph = 4 then disp_ph <= 0; else disp_ph <= disp_ph + 1; end if;
@@ -2763,8 +2763,14 @@ begin
 
 	if reset_l = '0' then
 		d80_i1 <= 0; d80_i2 <= 0;
-	else
+	elsif not80B = '0' then      -- muet hors 80B : plage partagee avec l'espion System 80
 		-- ⚠️ ON NE SUIT PLUS LES FRONTS DE U5_pa_out(4)/(5) SOI-MEME. Les deux verrous
+		-- ⚠️ CE SONT LES VERROUS DU CHEMIN SYSTEM 80 (sn74175_80_1/2). Le 80B a les SIENS
+		-- (sn74175_80B_1/2), cadences par u5pa_disp4/5 et dont les sorties sont eparpillees
+		-- dans segments_80B(1,2,6,7) et (9,10,14,15). Hors diagnostic les deux paires
+		-- capturent la meme donnee -- `not u5pb_disp(3:0)` au meme front -- et le texte sort
+		-- juste, verifie au banc : « HIGH GAMES TO DATE ». Si un jour le decodage derive en
+		-- diagnostic, c'est ici qu'il faudra basculer sur les verrous 80B et leur mapping.
 		-- sn74175 du chemin d'affichage les capturent DEJA : `Din_Seg_A` porte
 		-- U5_pb_out(3:0) au front de PA4, `Din_Seg_B` au front de PA5 (le module est
 		-- synchrone sur clk_50, et le double `not` de D/Qn s'annule). Lire ces sorties
@@ -2775,7 +2781,11 @@ begin
 
 		-- impulsion BASSE de LD : la carte inverse, donc registre bas = strobe physique
 		if u5pb_disp(4) = '0' and d80_ld1_d = '1' then
-			if o = x"01" then
+			-- La trame commence par une diffusion 0x01 PUIS 0xC0 : les DEUX remettent les
+			-- pointeurs a zero et ne sont pas des caracteres. Ne traiter que 0x01 laissait le
+			-- 0xC0 s'ecrire en position 0 -- vu au banc : « @. HIGH GAMES TO DATE », puisque
+			-- 0xC0 vaut '@' plus le bit de point decimal.
+			if o = x"01" or o = x"C0" then
 				d80_i1 <= 0; d80_i2 <= 0;
 			else
 				d80_wr_addr <= std_logic_vector(to_unsigned(768 + d80_i1, 10));
@@ -2784,7 +2794,7 @@ begin
 				if d80_i1 = 19 then d80_i1 <= 0; else d80_i1 <= d80_i1 + 1; end if;
 			end if;
 		elsif u5pb_disp(5) = '0' and d80_ld2_d = '1' then
-			if o = x"01" then
+			if o = x"01" or o = x"C0" then
 				d80_i1 <= 0; d80_i2 <= 0;
 			else
 				d80_wr_addr <= std_logic_vector(to_unsigned(768 + 20 + d80_i2, 10));
@@ -2804,8 +2814,11 @@ end generate GEN_DISP80B_SNOOP;
 -- un mux qui COUPAIT l'espion System 80 selon la famille tuait le lien, meme avec des
 -- lectures saines. L'espion 80B a la priorite quand il a un caractere a poser -- une
 -- poignee de cycles par trame -- et celui du System 80 ecrit le reste du temps. Les deux
--- visent des indices differents (768..815 contre 768..819), donc ils ne se marchent pas
--- dessus : c'est la famille annoncee qui decide lequel le decodeur lira.
+-- ⚠️ LEURS PLAGES SE RECOUVRENT : System 80 ecrit 768..815 (16 strobes x 3 groupes) et
+-- 80B ecrit 768..807 (2 lignes x 20 caracteres). Laisser les deux ecrire melange les
+-- octets -- vu au banc : « F. . OOO.OOO », du 7 segments decode comme de l'ASCII. Chacun
+-- se tait donc selon la famille, DANS SON PROCESS : la condition est sur l'ecriture, pas
+-- sur un multiplexeur externe -- c'est ce dernier qui tuait le lien.
 esp_v_en   <= disp_wr_en or d80_wr_en;
 esp_v_addr <= d80_wr_addr when d80_wr_en = '1' else disp_wr_addr;
 esp_v_data <= d80_wr_data when d80_wr_en = '1' else disp_wr_data;
