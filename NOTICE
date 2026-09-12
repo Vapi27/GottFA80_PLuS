@@ -93,14 +93,14 @@ The GPL requires modified files to carry prominent notices stating that they
 were changed and the date.  This section is that notice, at tree level; the
 individual files also carry dated in-line comments.
 
-  CAVEAT, TO BE SETTLED BEFORE PUBLISHING.  The git history in this repository
-  does not start from a pristine upstream import — its first commit already
-  contains the diagnostic bridge.  So for lisyctrl.vhd, spi_slave.vhd and
-  disp80b_diag.vhd the repository itself cannot prove who wrote what.  They are
-  listed below as added-in-this-fork because that is the working record, but
-  before the tree is published they should be diffed against bontango's own
-  GottFA80 / LISY sources; anything that turns out to come from there belongs
-  in §1, credited to bontango, not here.
+  PROVENANCE, SETTLED 2026-09-12.  An earlier version of this notice said the
+  git history could not prove who wrote lisyctrl.vhd, spi_slave.vhd and
+  disp80b_diag.vhd.  Checked since: lisyctrl.vhd and spi_slave.vhd first
+  appear in commit 8171c05 (2026-06-03, repository Vapi27/GottFA80_Pstore,
+  branch lisyctrl), a single commit on top of an unmodified bontango/GottFA80
+  main; disp80b_diag.vhd was added later on this branch.  None of the three
+  files exists in bontango/GottFA80, bontango/GottFA80_PLuS or bontango/LISY
+  (recursive trees fetched 2026-09-12).  They are Pstore's work, GPL-3.
 
 MODULES ADDED IN THIS FORK (Pstore, GPL-3 — see the caveat above)
 
@@ -128,6 +128,18 @@ MODULES ADDED IN THIS FORK (Pstore, GPL-3 — see the caveat above)
   lib_common/tourney_countdown.vhd, value_to_dispstr.vhd, bin_to_bcd.vhd,
   tourney_display_top.vhd         FPGA-side countdown chain, superseded by the
                                   ESP-side implementation (NOT instantiated).
+  lib_common/game_beacon.vhd      FPGA -> ESP status beacon (game number,
+                                  family, 6502 alive, 80A/80B) as one atomic
+                                  4-byte frame on the sound_link wire.
+  lib_common/audio_uart.vhd       ESP -> FPGA 14-bit audio samples over UART,
+                                  summed with GOSOF80 before the single
+                                  delta-sigma modulator (the "hybrid" build).
+  lib_portable/*.vhd              vendor-independent memory primitives (R5101,
+                                  RIOT_RAM, SB_RAM, GAME_ROM, SYSTEM_ROM): the
+                                  Spartan-6 port.  The Cyclone build keeps the
+                                  lib_cyclone_10 megafunction wrappers.
+  GottFA80_SLX9.ucf               Spartan-6 XC6SLX9 pin constraints (Smart FA).
+  construire_spartan6.sh          reproducible ISE 14.7 build for that target.
   sim/*                           GHDL testbenches and the regression runner.
   GottFA80_PLuS_HW21x_Cyclone_10/build.sh
                                   reproducible build + manifest generator.
@@ -156,6 +168,8 @@ MODIFIED UPSTREAM FILES
   lib_common/GOSOF80.vhd          diagnostic sound injection hook
   lib_common/R6532.vhd            port-A write strobe exported for snd_bus
                                   (EUPL v1.2 — modification noted per Art. 5)
+  lib_common/EEprom.vhd           NVRAM save in two alternating banks of the
+                                  M95256, bank pointer written last (2026-09-10)
 
 Upstream is NOT responsible for any of this, has not reviewed it, and the
 GottFA80 name is used only to say where the work came from.
@@ -183,8 +197,10 @@ or given away — is distribution under the GPL.  From that moment:
 
 The practical way to satisfy 1-3 is to publish this repository (including the
 modifications in §3) and to ship the URL and the commit hash with the board.
-Publishing has not been done; it is the owner's decision, and it is a
-PRECONDITION of giving a board to anyone else — not an optional extra.
+This tree is published at https://github.com/Vapi27/GottFA80_PLuS, branch
+spartan6-feasibility (the default branch since 2026-09-12).  The Smart FA
+module the Spartan-6 build runs on is documented at
+https://github.com/Vapi27/SmartFA.
 
 Courtesy, not a legal requirement: tell bontango.  The upstream project is
 actively maintained and several of the fixes here (the family decode, the sound

@@ -1,6 +1,7 @@
--- sound_link.vhd : 1-wire 8N1 UART link FPGA -> ESP companion. In the ESP-sound
--- build it drives the Debug pin (PIN_11 / K2), carrying everything the ESP needs
--- from the FPGA on a single wire next to the FPGA:
+-- sound_link.vhd : 1-wire 8N1 UART link FPGA -> ESP companion. On the Cyclone
+-- board it drove the Debug pin (PIN_11 / K2); on the Smart FA module it drives
+-- ESP32_RX (P142 -> ESP GPIO18, see GEN_LINK_* in SYS80.vhd). It carries
+-- everything the ESP needs from the FPGA on a single wire:
 --   1 0 0 s s s s s   (0x80 | sound[4:0])  -- ONE strobed sound latch        [gameplay, EVENT]
 --   0 1 g g g g g g   (0x40 | game[5:0])   -- the selected game number       [gameplay, LEVEL]
 --   1 1 1 1 0 0 0 d   (0xF0 | diag)        -- diag-mode token (d=1 on, 0 normal)   [LEVEL]

@@ -1,98 +1,113 @@
-# GottFA80_PLuS — fork Pstore, porté sur Spartan-6
+# GottFA80_PLuS — Pstore fork, ported to the Spartan-6 "Smart FA" module
 
-Carte CPU de remplacement pour les flippers **Gottlieb System 80 / 80A / 80B**, en VHDL.
+VHDL replacement CPU board for **Gottlieb System 80 / 80A / 80B** pinball machines.
+*(Version française : [`README.fr.md`](README.fr.md).)*
 
-Ce dépôt est une **version modifiée du travail de [bontango](https://github.com/bontango/GottFA80)**
-(GottFA80 / GottFA80_PLuS, GPL v3+, [lisy.dev](https://www.lisy.dev)). L'essentiel de la
-structure est la sienne : le haut niveau `SYS80.vhd`, la carte mémoire et le décodage
-d'adresse, les RIOT, l'afficheur, les lampes et les bobines, `boot_message`,
-`read_the_dips`, `EEprom`, `SD_Card`, `GOSOF80` et sa chaîne son, `attract`, les modèles
-SN74xx et le projet Quartus. **Lire [`NOTICE`](NOTICE)** : l'attribution y est détaillée
-fichier par fichier, ainsi que vos droits si vous recevez une carte ou un bitstream.
+This repository is a **modified version of [bontango](https://github.com/bontango/GottFA80_PLuS)'s
+GottFA80 / GottFA80_PLuS** (GPL v3+, [lisy.dev](https://www.lisy.dev)). The structure is his:
+the `SYS80.vhd` top level, the memory map and address decode, the RIOTs, the display, lamps and
+solenoids, `boot_message`, `read_the_dips`, `EEprom`, `SD_Card`, `GOSOF80` and its sound chain,
+`attract`, the SN74xx models and the Quartus project. **Read [`NOTICE`](NOTICE)**: it attributes
+the work file by file and states your rights if you receive a board or a bitstream.
 
-La branche `spartan6-feasibility` porte le design sur **Spartan-6 XC6SLX9** (module « Smart
-FA ») en plus de la cible Cyclone d'origine. Voir [`FAISABILITE_SPARTAN6.md`](FAISABILITE_SPARTAN6.md).
+## Which branch to read
 
-## Ce que ce fork ajoute
-
-Tout ce qui suit est écrit par Pstore et vit dans `lib_common/` :
-
-| Module | Rôle |
+| Branch | What it holds |
 |---|---|
-| `game_beacon` | balise d'état du FPGA vers l'ESP : jeu, famille, vie du 6502, lampes écrites |
-| `ram_snoop` | instantané périodique de la RAM du jeu, envoyé sur le lien série |
-| `disp_inject` | injection d'affichage et ligne de contrôle depuis l'ESP |
-| `sound_link` | codes son et télémétrie FPGA → ESP, avec arbitrage |
-| `audio_uart` | échantillons audio ESP → FPGA, sommés avant l'unique modulateur |
-| `disp80b_diag` | écriture de l'afficheur alphanumérique 80B (protocole à verrous 10941) |
-| `ta_overlay`, `tourney_*` | mode time-attack : chrono sur l'afficheur sans voler le score |
-| `EEprom` | sauvegarde NVRAM sur M95256, **deux bancs alternés**, pointeur écrit en dernier |
+| **`spartan6-feasibility`** (default) | The Pstore work: the design ported to the **Xilinx Spartan-6 XC6SLX9** of the [Smart FA module](https://github.com/Vapi27/SmartFA), plus the modules listed below. Every bitstream on a shipped Smart FA board is built from this branch. |
+| `main` | bontango's upstream, untouched (Cyclone 10 / Cyclone IV). |
+| `lisyctrl` | The first diagnostic-bridge work on the Cyclone target (June 2026), superseded by the branch above. |
 
-S'y ajoutent, dans le haut niveau : l'espion d'afficheur System 80 qui alimente le miroir du
-verre, la voix dans l'attract, et la ligne de contrôle P141.
+Related repositories: [**SmartFA**](https://github.com/Vapi27/SmartFA) (the module: schematics,
+pinout, the ESP↔FPGA link), [**gottfa-esp32**](https://github.com/Vapi27/gottfa-esp32) (the
+ESP32-S3 companion firmware this design talks to),
+[esp-fpga-flasher](https://github.com/Vapi27/esp-fpga-flasher) (Cyclone configuration flash
+programmed from an ESP32).
 
-## Construire
+## What this fork adds
 
-Cible Spartan-6, chaîne ISE 14.7 :
+All of it written by Pstore, GPL-3 like the rest. In `lib_common/`:
 
-```bash
-sh construire_spartan6.sh /tmp/monfit "use_sd=false esp_sound=false hybrid=true"
+| Module | Role |
+|---|---|
+| `nor_flash` | boots the game ROM from the module's SPI NOR (U6) instead of a microSD card |
+| `lisyctrl`, `spi_slave` | LISYcontrol diagnostic bridge over the shared SPI bus: switches, coils, lamps, sound, 80B text, watchdog |
+| `game_beacon` | FPGA → ESP status beacon: game number, family, 6502 alive, 80A/80B, as one atomic 4-byte frame |
+| `sound_link` | sound commands and telemetry FPGA → ESP on one UART wire, arbitrated |
+| `audio_uart` | 14-bit audio samples ESP → FPGA, summed with GOSOF80 before the single delta-sigma modulator |
+| `ram_snoop` | periodic snapshot of the game RAM on the serial link (the "glass mirror") |
+| `disp_inject` | display injection and the control line driven from the ESP |
+| `disp80b_diag` | 80B alphanumeric display writer (10941 latch protocol) for diag mode |
+| `gts_family` | System 80 / 80A / 80B decode from the game number, cross-checked against PinMAME |
+| `snd_bus` | strobe-qualified sound-bus event extraction |
+| `ta_overlay`, `tourney_*` | time-attack mode: a countdown on the display without stealing the score |
+| `EEprom` (modified) | NVRAM save on the M95256 in **two alternating banks**, pointer written last |
+
+And around it: `lib_portable/` (vendor-independent memory primitives — the reason one source
+tree fits both Cyclone and Spartan), [`GottFA80_SLX9.ucf`](GottFA80_SLX9.ucf) (the Spartan-6
+pin constraints), `construire_spartan6.sh` (the reproducible ISE build), `sim/` (GHDL
+testbenches). In the top level: the System 80 display spy feeding the glass mirror, speech in
+attract mode, and the P141 control line.
+
+## Building
+
+Spartan-6 target, Xilinx ISE 14.7 (installation notes: [`INSTALL_ISE.md`](INSTALL_ISE.md)):
+
+```sh
+sh construire_spartan6.sh /tmp/myfit "use_sd=false esp_sound=false hybrid=true"
 ```
 
-> 🔴 **`use_sd=false` n'est pas optionnel sur le module Smart FA.** Il n'a pas de carte SD.
-> Construire avec les défauts donne un design qui attend une SD absente, ne relâche **jamais**
-> `reset_l`, et laisse la carte **totalement muette** — alors que la LED de configuration
-> indique qu'elle est bien programmée. Piège payé deux fois.
+> 🔴 **`use_sd=false` is not optional on the Smart FA module.** It has no SD card. Building
+> with the source defaults gives a design that waits for an absent card, never releases
+> `reset_l`, and leaves the board **completely silent** — while the configuration LED says
+> it is programmed. Paid for twice.
 
-Cible Cyclone : projet Quartus dans `GottFA80_PLuS_HW21x_Cyclone_10/`.
+Cyclone target: the Quartus project in `GottFA80_PLuS_HW21x_Cyclone_10/`.
 
-### Les generics qui décident du comportement
+### The generics that decide the behaviour
 
-| Generic | Effet |
+| Generic | Effect |
 |---|---|
-| `use_sd` | `true` = ROM depuis la carte SD ; `false` = depuis la NOR U6 |
-| `esp_sound` / `hybrid` | son par l'ESP, par `GOSOF80`, ou les deux sommés |
-| `ctrl_line_en` | active la ligne de contrôle P141 (voir l'avertissement ci-dessous) |
-| `bench_game` | force un numéro de jeu au banc, au lieu de lire les DIP |
-| `lamp_snoop_en` | espion de lampes — **laisser à `false`**, voir plus bas |
+| `use_sd` | `true` = game ROM from the SD card; `false` = from the NOR U6 |
+| `esp_sound` / `hybrid` | sound from the ESP, from `GOSOF80`, or both summed (`hybrid`, the shipped build) |
+| `ctrl_line_en` | enables the P141 control line (see the warning below) |
+| `bench_game` | forces a game number on the bench instead of reading the DIP switches |
+| `lamp_snoop_en` | lamp spy — **leave at `false`**, see below |
 
-## Pièges mesurés sur matériel
+## Measured on hardware
 
-Ils ont tous coûté du temps ; ils sont documentés dans le code, à l'endroit exact où ils
-mordent.
+Each of these cost time; each is documented in the code at the exact place where it bites.
 
-**La ligne de contrôle P141 acceptait 1 ms.** Un niveau bas d'une milliseconde suffisait à
-déclencher `lisy_active` — donc à tenir le 6502 en reset et à rendre les lampes à
-`lisyctrl`, qui n'écrit rien. Or un simple redémarrage de l'ESP produit un tel creux, et
-**ouvrir le port série redémarre l'ESP** : la machine se figeait à chaque tentative
-d'observation. Le seuil est à 100 ms depuis. ⚠️ Le prescaler doit rester une constante
-**distincte** du seuil, sans quoi l'armement de 2 s deviendrait 200 s.
+**The P141 control line accepted 1 ms.** One millisecond low was enough to assert
+`lisy_active` — hold the 6502 in reset and hand the lamps to `lisyctrl`, which writes nothing.
+A plain ESP reboot produces such a dip, and **opening the serial port reboots the ESP**: the
+machine froze on every attempt to observe it. The threshold is 100 ms now. ⚠️ The prescaler
+must stay a constant **distinct** from the threshold, or the 2 s arming becomes 200 s.
 
-**Un espion peut entretenir la panne qu'il observe.** L'espion de lampes a masqué un
-correctif valable pendant cinq gravures. Il est désormais sous `generate` et à `false` par
-défaut : il ne doit rien coûter, ni en logique ni en confiance, tant que personne ne l'a
-demandé.
+**A spy can sustain the fault it observes.** The lamp spy masked a valid fix for five
+burns. It now sits under `generate` and defaults to `false`: it must cost nothing, in logic or
+in trust, until somebody asks for it.
 
-**Les DIP ne sont lus qu'au reset.** Changer un interrupteur sans couper l'alimentation ne
-produit rien.
+**The DIP switches are read at reset only.** Flipping one with the power on does nothing.
 
-**`ram_snoop` translate ses lectures** de +128 au-delà de l'indice 384, pour couvrir la
-5101 en 512..767. L'indice 640 de la trame lit donc `shadow(768)`.
+**`ram_snoop` offsets its reads** by +128 past index 384 to cover the 5101 at 512..767, so
+frame index 640 reads `shadow(768)`.
 
-**Un port `out` ne se relit pas** en VHDL : les signaux internes `u5_pa_i` et `disp_seg_i`
-existent pour ça.
+**An `out` port cannot be read back** in VHDL: the internal signals `u5_pa_i` and `disp_seg_i`
+exist for that.
 
 ## Documents
 
-[`FAISABILITE_SPARTAN6.md`](FAISABILITE_SPARTAN6.md) (le portage),
-[`BUILD_VARIANTS.md`](BUILD_VARIANTS.md) (les combinaisons de generics),
-[`INSTALL_ISE.md`](INSTALL_ISE.md), [`LISYCTRL.md`](LISYCTRL.md) (le protocole de
-diagnostic), [`NOR_FLASH.md`](NOR_FLASH.md), [`SOUND_80B.md`](SOUND_80B.md).
+Most of these are in French. [`FAISABILITE_SPARTAN6.md`](FAISABILITE_SPARTAN6.md) (the
+port), [`BUILD_VARIANTS.md`](BUILD_VARIANTS.md) (generic combinations, Cyclone era),
+[`INSTALL_ISE.md`](INSTALL_ISE.md), [`LISYCTRL.md`](LISYCTRL.md) (the diagnostic protocol),
+[`NOR_FLASH.md`](NOR_FLASH.md), [`SOUND_80B.md`](SOUND_80B.md).
 
-Les bancs de test sont dans `sim/` (`sh sim/run_all.sh`).
+Testbenches: `sh sim/run_all.sh` (GHDL).
 
 ## Licence
 
-GNU GPL v3 ou ultérieure, comme l'amont. Si vous recevez une carte ou un bitstream construit
-depuis cet arbre, vous avez droit au code source complet correspondant — voir
-[`NOTICE`](NOTICE), section « OBLIGATIONS WHEN YOU SHIP THIS ».
+GNU GPL v3 or later, as upstream. If you receive a board or a bitstream built from this tree
+you are entitled to the complete corresponding source — see [`NOTICE`](NOTICE), section
+"OBLIGATIONS WHEN YOU SHIP THIS". Gottlieb game ROM images are not part of this repository
+and never will be: the owner of a machine supplies their own dump.

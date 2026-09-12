@@ -1,5 +1,11 @@
 # GottFA80_PLuS — build variants (Pstore)
 
+> **Note (2026-09-12).** This document describes the Cyclone-era options. On the Smart FA
+> (Spartan-6) module the FPGA→ESP link is on **P142 (`ESP32_RX`)**, not on `Debug`, and the
+> shipped build is `hybrid=true`: GOSOF80 sound effects *and* the ESP's speech, summed in
+> `audio_uart`/`dac` before the single modulator. Build with `construire_spartan6.sh`; see
+> [`README.md`](README.md).
+
 Two compile-time generics on `SYS80` select the product. Both default to the
 **stock** behaviour, so an unchanged build is bit-for-bit the original board and the
 diff to bontango stays non-invasive.
